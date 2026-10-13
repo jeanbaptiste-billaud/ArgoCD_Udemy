@@ -1,0 +1,19 @@
+metadata:
+  name: helm-demo
+  namespace: argocd
+spec:
+  destination:
+    namespace: helm-demo
+    server: https://kubernetes.default.svc
+  project: helmproj
+  source:
+    path: helm
+    repoURL: git@github.com:jeanbaptiste-billaud/roar-k8s-helm.git
+    targetRevision: HEAD
+  syncPolicy:
+    automated:
+      enabled: true
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true

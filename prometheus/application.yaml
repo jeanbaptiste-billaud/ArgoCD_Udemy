@@ -1,0 +1,36 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: prometheus
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: ghcr.io/prometheus-community/charts
+    chart: kube-prometheus-stack
+    targetRevision: 92.3.1
+    helm:
+      releaseName: prometheus
+      valuesObject:
+        prometheus:
+          service:
+            type: NodePort
+            nodePort: 30060
+        grafana:
+          adminPassword: "admin"
+          service:
+            type: NodePort
+            nodePort: 30070
+        prometheus-node-exporter:
+          hostRootFsMount:
+            enabled: false # pas de montage de la racine sous wsl
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prometheus
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

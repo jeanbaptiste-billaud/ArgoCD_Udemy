@@ -1,0 +1,31 @@
+server:
+  service:
+    type: NodePort
+    nodePorts:
+      http: 30080
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      additionalLabels:
+        release: prometheus
+
+controller:
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      additionalLabels:
+        release: prometheus
+
+repoServer:
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      additionalLabels:
+        release: prometheus
+
+configs:
+  params:
+    server.insecure: true
