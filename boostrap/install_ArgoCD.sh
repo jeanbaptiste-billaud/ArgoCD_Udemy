@@ -11,7 +11,7 @@ helm install argocd argo/argo-cd \
   --namespace argocd \
   --create-namespace \
   --version 10.1.3 \
-  -f argocd-values.yaml
+  -f boostrap/argocd-values.yaml
 
 # ------ Installation CLI ------
 curl -sSL -o argocd \

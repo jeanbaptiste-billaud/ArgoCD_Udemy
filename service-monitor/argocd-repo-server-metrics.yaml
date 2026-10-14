@@ -5,8 +5,6 @@ metadata:
   labels:
     release: prometheus
 spec:
-#  namespaceSelector:
-#    any: true
   selector:
     matchLabels:
       app.kubernetes.io/name: argocd-repo-server
