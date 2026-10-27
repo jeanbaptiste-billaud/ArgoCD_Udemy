@@ -18,7 +18,7 @@ metadata:
 spec:
   project: infra
   source:
-    repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy
+    repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
     path: projects
     directory:
       recurse: true
@@ -45,7 +45,7 @@ metadata:
 spec:
   project: infra
   source:
-    repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy
+    repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
     path: apps
     directory:
       recurse: true
