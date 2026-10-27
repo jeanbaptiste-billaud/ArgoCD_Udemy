@@ -10,6 +10,7 @@ spec:
     - https://charts.external-secrets.io
     - https://openbao.github.io/openbao-helm
     - ghcr.io/prometheus-community/charts
+    - https://argoproj.github.io/argo-helm
   # Un namespace par application
   destinations:
     - server: https://kubernetes.default.svc
