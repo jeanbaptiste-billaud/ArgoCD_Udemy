@@ -10,7 +10,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: root-projects
-  namespace: ops
+  namespace: argocd #namespace d'installation de argo
   finalizers:
     - resources-finalizer.argocd.argoproj.io
   annotations:
@@ -37,7 +37,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: root-apps
-  namespace: ops
+  namespace: argocd
   finalizers:
     - resources-finalizer.argocd.argoproj.io
   annotations:
