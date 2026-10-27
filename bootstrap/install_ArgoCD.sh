@@ -11,7 +11,14 @@ helm install argocd argo/argo-cd \
   --namespace argocd \
   --create-namespace \
   --version 10.1.3 \
-  -f boostrap/argocd-values.yaml
+  -f bootstrap/argocd-values.yaml \
+  --set server.metrics.serviceMonitor.enabled=false \
+  --set controller.metrics.serviceMonitor.enabled=false \
+  --set repoServer.metrics.serviceMonitor.enabled=false
+# ServiceMonitors desactives ici : la CRD n'existe pas tant que Prometheus
+# n'est pas installe. L'Application "argocd" les reactive ensuite depuis Git.
+
+kubectl -n argocd rollout status deploy/argocd-server --timeout=300s
 
 # ------ Installation CLI ------
 curl -sSL -o argocd \
@@ -35,6 +42,9 @@ argocd login $NODE_IP:30080 \
   --password $password \
   --insecure \
   --grpc-web
+
+# ------ Bootstrap GitOps : AppProject infra + root-apps ------
+kubectl apply -f bootstrap/root-app.yaml
 
 # ------ Vérification finale ------
 argocd app list

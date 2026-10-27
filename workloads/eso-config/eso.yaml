@@ -1,0 +1,36 @@
+# ClusterSecretStore : OpenBao accessible depuis tous les namespaces
+# (ressource cluster-scoped, pas de metadata.namespace)
+apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata:
+  name: openbao-backend
+spec:
+  provider:
+    vault:                       # OpenBao est compatible avec le provider Vault
+      server: "http://openbao.openbao.svc:8200"   # DNS interne au cluster, stable
+      path: "secret"             # moteur KV v2 monté par défaut en mode dev
+      version: "v2"
+      auth:
+        tokenSecretRef:
+          name: vault-token
+          key: token
+          namespace: external-secrets   # obligatoire pour un ClusterSecretStore
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: db-credentials
+  namespace: production
+spec:
+  refreshInterval: 1m
+  secretStoreRef:
+    name: openbao-backend
+    kind: ClusterSecretStore
+  target:
+    name: db-credentials
+    creationPolicy: Owner
+  data:
+    - secretKey: password
+      remoteRef:
+        key: production/db
+        property: password

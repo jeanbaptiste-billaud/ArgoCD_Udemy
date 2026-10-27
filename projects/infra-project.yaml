@@ -4,23 +4,26 @@ metadata:
   name: infra
   namespace: argocd
 spec:
+  description: Composants plateforme (secrets, monitoring)
   sourceRepos:
     - https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
+    - https://charts.external-secrets.io
+    - https://openbao.github.io/openbao-helm
+    - ghcr.io/prometheus-community/charts
+  # Un namespace par application
   destinations:
     - server: https://kubernetes.default.svc
-      namespace: ops
+      namespace: argocd            # les Applications enfants elles-memes
     - server: https://kubernetes.default.svc
-      namespace: external-secrets
+      namespace: external-secrets  # operateur ESO
     - server: https://kubernetes.default.svc
-      namespace: openbao
+      namespace: openbao           # OpenBao
     - server: https://kubernetes.default.svc
-      namespace: tools
+      namespace: monitoring        # kube-prometheus-stack
     - server: https://kubernetes.default.svc
-      namespace: gpu-operator
+      namespace: production        # SecretStore / ExternalSecret
     - server: https://kubernetes.default.svc
-      namespace: monitoring
-    - server: https://kubernetes.default.svc
-      namespace: kube-system
+      namespace: kube-system       # composants systeme deployes par certains charts
   clusterResourceWhitelist:
     - group: '*'
       kind: '*'

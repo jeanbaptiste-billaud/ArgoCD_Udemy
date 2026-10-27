@@ -3,8 +3,12 @@ kind: Application
 metadata:
   name: prometheus
   namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
-  project: default
+  project: infra
   source:
     repoURL: ghcr.io/prometheus-community/charts
     chart: kube-prometheus-stack
@@ -26,7 +30,7 @@ spec:
             enabled: false # pas de montage de la racine sous wsl
   destination:
     server: https://kubernetes.default.svc
-    namespace: prometheus
+    namespace: monitoring
   syncPolicy:
     automated:
       prune: true
