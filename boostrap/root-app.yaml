@@ -1,0 +1,60 @@
+# ===================================================================
+# ROOT APPLICATION — Entry point du pattern app-of-apps
+# ===================================================================
+# Ce fichier est le SEUL applique manuellement, une fois, au bootstrap :
+#   kubectl apply -f bootstrap/root-app.yaml
+# ===================================================================
+---
+# Application 1 : sync les AppProjects (wave -1 pour exister avant tout)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root-projects
+  namespace: ops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  project: infra
+  source:
+    repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy
+    path: projects
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ops
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
+---
+# Application 2 : sync toutes les Applications platform (apps/)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root-apps
+  namespace: ops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: infra
+  source:
+    repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy
+    path: apps
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ops
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

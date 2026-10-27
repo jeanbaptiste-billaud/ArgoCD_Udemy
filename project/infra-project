@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: infra
+  namespace: ops
+spec:
+  sourceRepos:
+    - https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: ops
+    - server: https://kubernetes.default.svc
+      namespace: external-secrets
+      namespace: openbao
+    - server: https://kubernetes.default.svc
+      namespace: tools
+    - server: https://kubernetes.default.svc
+      namespace: gpu-operator
+    - server: https://kubernetes.default.svc
+      namespace: monitoring
+    - server: https://kubernetes.default.svc
+      namespace: kube-system
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'

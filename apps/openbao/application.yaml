@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: openbao
+spec:
+  destination:
+    namespace: openbao
+    server: https://kubernetes.default.svc
+  source:
+    path: ''
+    repoURL: https://openbao.github.io/openbao-helm
+    targetRevision: 0.30.3
+    chart: openbao
+    helm:
+      valuesObject:
+        server:
+          dev:
+            enabled: true
+            devRootToken: "root"
+          service:
+            type: NodePort
+            nodePort: 30200
+
+  sources: []
+  project: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: false
+      enabled: true
+    syncOptions:
+      - CreateNamespace=true
