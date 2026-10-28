@@ -43,7 +43,7 @@ argocd login $NODE_IP:30080 \
   --insecure \
   --grpc-web
 
-# ------ Bootstrap GitOps : AppProject infra + root-apps ------
+# ------ Bootstrap GitOps : root-projects + root-apps ------
 kubectl apply -f bootstrap/root-app.yaml
 
 # ------ Vérification finale ------
