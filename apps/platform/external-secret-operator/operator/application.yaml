@@ -16,6 +16,13 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: external-secrets
+  # Le cert-controller d'ESO injecte lui-meme le caBundle dans ses webhooks :
+  # sans ca, ArgoCD le voit comme une derive et le reecrit en boucle (selfHeal).
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
   syncPolicy:
     automated:
       prune: true
@@ -23,3 +30,4 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+      - RespectIgnoreDifferences=true   # ne pas ecraser le caBundle au sync
