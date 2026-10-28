@@ -25,9 +25,17 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: openbao
+  # L'agent injector (vault-k8s) genere son certificat et injecte lui-meme
+  # le caBundle dans son webhook : ArgoCD ne doit pas le comparer a Git.
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
   syncPolicy:
     automated:
       prune: true
       selfHeal: false
     syncOptions:
       - CreateNamespace=true
+      - RespectIgnoreDifferences=true   # ne pas ecraser le caBundle au sync
