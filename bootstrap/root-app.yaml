@@ -59,6 +59,9 @@ spec:
     path: apps
     directory:
       recurse: true
+      # Prometheus n'est pas deploye automatiquement : appliquer a la main
+      #   kubectl apply -f apps/platform/prometheus/application.yaml
+      exclude: 'platform/prometheus/*'
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
