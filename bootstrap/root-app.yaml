@@ -2,46 +2,43 @@
 # BOOTSTRAP — seul fichier applique a la main, une seule fois :
 #   kubectl apply -f bootstrap/root-app.yaml
 # Il cree :
-#   1. l'AppProject "infra" utilise par toutes les Applications
+#   1. l'Application "root-projects" qui synchronise projects/ (AppProjects)
 #   2. l'Application racine "root-apps" qui synchronise apps/
 # Ensuite, ce fichier est lui-meme gere par l'Application "argocd"
 # (apps/argocd), donc toute modification passe par Git.
 # ===================================================================
 ---
+# Application 1 : sync les AppProjects (wave -1 pour exister avant tout).
+# Projet "default" : "infra" n'existe pas encore tant que celle-ci n'a pas tourne.
 apiVersion: argoproj.io/v1alpha1
-kind: AppProject
+kind: Application
 metadata:
-  name: infra
+  name: root-projects
   namespace: argocd
   annotations:
     argocd.argoproj.io/sync-wave: "-1"
-    argocd.argoproj.io/sync-options: Delete=false   # ne jamais supprimer le projet en cascade
+    argocd.argoproj.io/sync-options: Delete=false   # protege les AppProjects
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
-  description: Composants plateforme (ArgoCD, secrets, monitoring)
-  sourceRepos:
-    - https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
-    - https://argoproj.github.io/argo-helm
-    - https://charts.external-secrets.io
-    - https://openbao.github.io/openbao-helm
-    - ghcr.io/prometheus-community/charts
-  # Un namespace par application
-  destinations:
-    - server: https://kubernetes.default.svc
-      namespace: argocd            # ArgoCD + les Applications elles-memes
-    - server: https://kubernetes.default.svc
-      namespace: external-secrets  # operateur ESO
-    - server: https://kubernetes.default.svc
-      namespace: openbao           # OpenBao
-    - server: https://kubernetes.default.svc
-      namespace: monitoring        # kube-prometheus-stack
-    - server: https://kubernetes.default.svc
-      namespace: production        # ExternalSecret
-    - server: https://kubernetes.default.svc
-      namespace: kube-system       # composants systeme deployes par certains charts
-  clusterResourceWhitelist:
-    - group: '*'
-      kind: '*'
+  project: default
+  source:
+    repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
+    targetRevision: main
+    path: projects
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
 ---
+# Application 2 : sync toutes les Applications platform (apps/)
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

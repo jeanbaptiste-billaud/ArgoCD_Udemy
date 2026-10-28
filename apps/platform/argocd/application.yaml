@@ -1,7 +1,7 @@
 # ArgoCD gere par lui-meme :
 #   - source 1 : chart Helm argo-cd, avec les values de bootstrap/argocd-values.yaml
 #   - source 2 : le repo Git, reference $values pour lire ces values
-#   - source 3 : bootstrap/root-app.yaml (AppProject infra + root-apps) pour
+#   - source 3 : bootstrap/root-app.yaml (root-projects + root-apps) pour
 #                que le bootstrap soit lui aussi synchronise depuis Git
 apiVersion: argoproj.io/v1alpha1
 kind: Application

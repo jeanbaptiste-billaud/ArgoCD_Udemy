@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: infra
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-options: Delete=false   # ne jamais supprimer le projet en cascade
+spec:
+  description: Composants plateforme (ArgoCD, secrets, monitoring)
+  sourceRepos:
+    - https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
+    - https://argoproj.github.io/argo-helm
+    - https://charts.external-secrets.io
+    - https://openbao.github.io/openbao-helm
+    - ghcr.io/prometheus-community/charts
+  # Un namespace par application
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: argocd            # ArgoCD + les Applications elles-memes
+    - server: https://kubernetes.default.svc
+      namespace: external-secrets  # operateur ESO
+    - server: https://kubernetes.default.svc
+      namespace: openbao           # OpenBao
+    - server: https://kubernetes.default.svc
+      namespace: monitoring        # kube-prometheus-stack
+    - server: https://kubernetes.default.svc
+      namespace: production        # ExternalSecret
+    - server: https://kubernetes.default.svc
+      namespace: kube-system       # composants systeme deployes par certains charts
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'
