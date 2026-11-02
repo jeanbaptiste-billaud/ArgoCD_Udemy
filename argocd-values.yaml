@@ -1,0 +1,14 @@
+# Values MINIMALES pour le premier "helm install" d'ArgoCD.
+# Juste de quoi demarrer et acceder a l'UI. Les values completes
+# (metrics, ServiceMonitors...) vivent sur main :
+#   manifests/argocd/values.yaml
+# et sont appliquees par l'Application "argocd" des le premier sync.
+server:
+  service:
+    type: NodePort
+    nodePorts:
+      http: 30080
+
+configs:
+  params:
+    server.insecure: true
