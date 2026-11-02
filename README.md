@@ -284,7 +284,23 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/seaweedfs/valu
 
 ### `workloads/seaweedfs/s3-credentials.yaml`
 
-`ExternalSecret` `seaweedfs-s3-config` (namespace `seaweedfs`) : lit `accessKey` / `secretKey` dans le secret OpenBao `seaweedfs/s3` et génère (via un `template` ESO) la clé `seaweedfs_s3_config`, au format JSON d'identités attendu par `weed s3 -config`. Une seule identité `mlflow` avec les droits `Admin`, `Read`, `Write`, `List`, `Tagging`.
+`ExternalSecret` `seaweedfs-s3-config` (namespace `seaweedfs`) : génère (via un `template` ESO) la clé `seaweedfs_s3_config`, au format JSON d'identités attendu par `weed s3 -config`. Deux identités :
+
+| Identité | Clés lues dans OpenBao | Droits |
+|---|---|---|
+| `admin` | `secret/seaweedfs/admin` | `Admin`, `Read`, `Write`, `List`, `Tagging` sur tous les buckets |
+| `mlflow` | `secret/seaweedfs/s3` | `Read`, `Write`, `List`, `Tagging` sur le bucket `mlflow` uniquement (`Read:mlflow`…) |
+
+La config n'est lue **qu'au démarrage** de SeaweedFS : après une modification (fichier ou clés dans OpenBao), redémarrer le pod.
+
+Lister les identités réellement chargées (clés masquées) :
+
+```bash
+kubectl -n seaweedfs exec deploy/seaweedfs-all-in-one -- sh -c 'echo s3.configure | weed shell' \
+  | sed -E 's/("(access|secret)Key": ")[^"]*/\1***/'
+```
+
+`s3.configure` sans `-apply` ne modifie rien. Ne pas créer d'identités avec `s3.configure -apply` : elles vivraient dans le filer, hors GitOps.
 
 > Pourquoi pas les identifiants générés par le chart ? Son Secret S3 utilise `lookup` + `randAlphaNum` pour conserver des clés aléatoires entre deux `helm upgrade`. **ArgoCD ne supporte pas `lookup`** (il fait un `helm template`) : les clés seraient régénérées à chaque sync. D'où `existingConfigSecret`.
 
@@ -432,11 +448,15 @@ kubectl -n external-secrets create secret generic vault-token \
 ### 5. Identifiants S3 de SeaweedFS
 
 ```bash
+# identité admin (tous les droits)
+kubectl -n openbao exec openbao-0 -- sh -c \
+  'BAO_TOKEN=<root-token> bao kv put secret/seaweedfs/admin accessKey=<access-key> secretKey=<secret-key>'
+# identité mlflow (bucket mlflow uniquement), aussi utilisée par MLflow
 kubectl -n openbao exec openbao-0 -- sh -c \
   'BAO_TOKEN=<root-token> bao kv put secret/seaweedfs/s3 accessKey=<access-key> secretKey=<secret-key>'
 ```
 
-ESO crée alors le Secret `seaweedfs-s3-config` et le pod SeaweedFS démarre. Ces mêmes clés sont utilisées par MLflow (Secret `mlflow-s3-credentials`). Pour une rotation, modifier le secret dans OpenBao puis redémarrer le pod (`kubectl -n seaweedfs rollout restart deploy/seaweedfs-all-in-one`) : la config S3 n'est lue qu'au démarrage.
+ESO crée alors le Secret `seaweedfs-s3-config` et le pod SeaweedFS démarre. Les clés `mlflow` sont aussi utilisées par MLflow (Secret `mlflow-s3-credentials`). Pour une rotation, modifier le secret dans OpenBao puis redémarrer le pod (`kubectl -n seaweedfs rollout restart deploy/seaweedfs-all-in-one`) : la config S3 n'est lue qu'au démarrage.
 
 ### 6. Superutilisateur PostgreSQL
 
@@ -481,7 +501,7 @@ kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP
 |---|---|---|
 | ArgoCD | `http://<IP>:30080` | `admin` / `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' \| base64 -d` |
 | OpenBao | `http://<IP>:30200` | root token obtenu au `bao operator init` |
-| SeaweedFS S3 | `http://<IP>:30333` | `accessKey` / `secretKey` de `secret/seaweedfs/s3` |
+| SeaweedFS S3 | `http://<IP>:30333` | identité `admin` : `secret/seaweedfs/admin` ; identité `mlflow` : `secret/seaweedfs/s3` |
 | MLflow | `http://<IP>:30500` | — (pas d'authentification) |
 | Prometheus | `http://<IP>:30060` | — (si déployé) |
 | Grafana | `http://<IP>:30070` | `admin` / `admin` (si déployé) |
@@ -668,7 +688,7 @@ Ce repo est un **lab local**. Plusieurs choix sont inacceptables en production :
 | Mot de passe Grafana `admin` en clair dans Git | `apps/platform/prometheus/application.yaml` | Secret externe (ESO) via `grafana.admin.existingSecret` |
 | ArgoCD en HTTP (`server.insecure: true`) | `manifests/argocd/values.yaml` + `argocd-values.yaml` (branche `bootstrap`) | TLS via Ingress |
 | Services en NodePort | plusieurs | Ingress + authentification |
-| SeaweedFS mono-pod, S3 en HTTP, identité S3 unique avec droits `Admin` | `manifests/seaweedfs/values.yaml`, `workloads/seaweedfs/` | Composants séparés et répliqués, TLS, une identité par client avec droits limités au bucket |
+| SeaweedFS mono-pod, S3 en HTTP, identité `admin` à tous les droits | `manifests/seaweedfs/values.yaml`, `workloads/seaweedfs/` | Composants séparés et répliqués, TLS, identité admin réservée à l'exploitation |
 | MLflow sans authentification, `serverAllowedHosts: *` | `manifests/mlflow/values.yaml` | `auth`/OIDC activé, liste d'hôtes explicite, Ingress TLS |
 | PostgreSQL mono-instance sans sauvegarde | `workloads/postgres/` | Opérateur (CloudNativePG) avec réplication et sauvegardes |
 | `clusterResourceWhitelist: */*` | `projects/infra-project.yaml` | Liste restreinte des kinds nécessaires |
