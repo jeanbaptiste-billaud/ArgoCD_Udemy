@@ -1,4 +1,4 @@
-# Config ESO (SecretStore + ExternalSecret) : tuile separee, apres l'operateur
+# Config ESO (ClusterSecretStore) : tuile separee, apres l'operateur
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -16,7 +16,7 @@ spec:
     path: workloads/eso-config
   destination:
     server: https://kubernetes.default.svc
-    namespace: production
+    namespace: external-secrets   # le ClusterSecretStore est cluster-scoped
   syncPolicy:
     automated:
       prune: true

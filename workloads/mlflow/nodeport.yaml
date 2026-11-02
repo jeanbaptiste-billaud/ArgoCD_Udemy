@@ -1,0 +1,16 @@
+# Acces externe a l'UI / API MLflow sur un NodePort fixe
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow-nodeport
+  namespace: mlflow
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: mlflow
+    app.kubernetes.io/instance: mlflow
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+      nodePort: 30500

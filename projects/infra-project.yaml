@@ -32,8 +32,6 @@ spec:
     - server: https://kubernetes.default.svc
       namespace: monitoring        # kube-prometheus-stack
     - server: https://kubernetes.default.svc
-      namespace: production        # ExternalSecret
-    - server: https://kubernetes.default.svc
       namespace: kube-system       # composants systeme deployes par certains charts
   clusterResourceWhitelist:
     - group: '*'

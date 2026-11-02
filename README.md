@@ -65,7 +65,7 @@ flowchart TD
 
     ARGO -->|chart argo-cd + values| ARGOCD[(ArgoCD)]
     ESO -->|chart external-secrets| ESOD[(ESO)]
-    ESOC -->|workloads/eso-config| CSS[(ClusterSecretStore<br/>+ ExternalSecret)]
+    ESOC -->|workloads/eso-config| CSS[(ClusterSecretStore)]
     BAO -->|chart openbao| BAOD[(OpenBao)]
     SWFS -->|chart seaweedfs + workloads/seaweedfs| SWFSD[(SeaweedFS S3)]
     PG -->|workloads/postgres| PGD[(PostgreSQL)]
@@ -140,15 +140,21 @@ ArgoCD_Udemy/
 │       └── values.yaml
 ├── workloads/                         # manifests "bruts" référencés par des Applications
 │   ├── eso-config/
-│   │   └── eso.yaml                   # ClusterSecretStore OpenBao + ExternalSecret de démo
+│   │   └── cluster-secret-store.yaml  # ClusterSecretStore OpenBao
 │   ├── seaweedfs/
-│   │   └── s3-config.yaml             # ExternalSecret : config S3 de SeaweedFS depuis OpenBao
+│   │   └── s3-credentials.yaml        # ExternalSecret : config S3 de SeaweedFS depuis OpenBao
 │   ├── postgres/
-│   │   ├── server.yaml                # ExternalSecret superutilisateur + Service + StatefulSet
-│   │   └── databases/                 # 1 fichier par application qui a besoin d'une base
-│   │       └── mlflow.yaml            # ExternalSecret + Job : rôle et base "mlflow"
+│   │   ├── admin-credentials.yaml     # ExternalSecret du superutilisateur
+│   │   ├── service.yaml               # Service postgres.postgres.svc:5432
+│   │   ├── statefulset.yaml           # serveur PostgreSQL
+│   │   └── databases/                 # 1 dossier par application qui a besoin d'une base
+│   │       └── mlflow/
+│   │           ├── credentials.yaml   # ExternalSecret du rôle "mlflow"
+│   │           └── create-db-job.yaml # Job : rôle et base "mlflow"
 │   └── mlflow/
-│       └── mlflow.yaml                # ExternalSecrets (Postgres, S3) + Service NodePort de MLflow
+│       ├── postgres-credentials.yaml  # ExternalSecret : accès à la base mlflow
+│       ├── s3-credentials.yaml        # ExternalSecret : accès S3 à SeaweedFS
+│       └── nodeport.yaml              # Service NodePort 30500
 └── roar-k8s-helm.yaml                 # exercice du cours, NON géré par le GitOps
 ```
 
@@ -160,7 +166,7 @@ ArgoCD_Udemy/
 | `projects/` | Uniquement des `AppProject` | `root-projects` | Un fichier par projet |
 | `apps/` | Uniquement des `Application` ArgoCD | `root` (récursif) | Un dossier par composant, un fichier `application.yaml`. **Aucun autre YAML** (sinon `root` essaie de l'appliquer) |
 | `manifests/` | Fichiers de values Helm | lus via `$values` par une Application | Jamais synchronisé directement |
-| `workloads/` | Manifests Kubernetes classiques | une Application de `apps/` qui pointe dessus | Jamais synchronisé directement par une app racine |
+| `workloads/` | Manifests Kubernetes classiques | une Application de `apps/` qui pointe dessus | Jamais synchronisé directement par une app racine. **Un fichier par ressource** |
 
 > ⚠️ Un objet Kubernetes ne doit être défini **qu'à un seul endroit**. Si deux Applications gèrent le même objet, elles le réécrivent chacune leur tour et passent en OutOfSync en boucle (c'est arrivé avec l'AppProject `infra`, voir [Pièges connus](#choix-techniques-et-pièges-connus)).
 
@@ -213,7 +219,7 @@ AppProject **`infra`**, utilisé par toutes les Applications plateforme. Il déf
   - `https://seaweedfs.github.io/seaweedfs/helm` (chart SeaweedFS) ;
   - `https://community-charts.github.io/helm-charts` (chart MLflow) ;
   - `ghcr.io/prometheus-community/charts` (chart OCI kube-prometheus-stack).
-- **`destinations`** — où elles peuvent déployer : `argocd`, `external-secrets`, `openbao`, `seaweedfs`, `postgres`, `mlflow`, `monitoring`, `production`, `kube-system` (certains charts y posent des composants, ex. Services de kubelet pour Prometheus).
+- **`destinations`** — où elles peuvent déployer : `argocd`, `external-secrets`, `openbao`, `seaweedfs`, `postgres`, `mlflow`, `monitoring`, `kube-system` (certains charts y posent des composants, ex. Services de kubelet pour Prometheus).
 - **`clusterResourceWhitelist: */*`** — autorise les ressources cluster-scoped (CRDs, ClusterRoles, webhooks…), nécessaires aux opérateurs.
 - Annotation `Delete=false` : l'AppProject n'est jamais supprimé en cascade, même si `root-projects` l'est.
 
@@ -243,9 +249,9 @@ Application **`external-secrets-operator`** (sync-wave `0`) — installe le char
 
 ### `apps/platform/external-secret-operator/config/application.yaml`
 
-Application **`eso-config`** (sync-wave `1`, donc **après** l'opérateur) — déploie `workloads/eso-config/` dans le namespace `production`.
+Application **`eso-config`** (sync-wave `1`, donc **après** l'opérateur) — déploie `workloads/eso-config/` (destination `external-secrets` ; le `ClusterSecretStore` est cluster-scoped).
 
-- Séparée de l'opérateur car elle crée des objets (`ClusterSecretStore`, `ExternalSecret`) dont les **CRDs sont installées par l'opérateur**.
+- Séparée de l'opérateur car elle crée un `ClusterSecretStore`, dont la **CRD est installée par l'opérateur**.
 - `SkipDryRunOnMissingResource=true` + **`retry`** (10 tentatives, backoff 30 s → 5 min) : au tout premier passage, les CRDs ESO peuvent ne pas encore exister ; ArgoCD réessaie jusqu'à ce qu'elles soient là.
 
 ### `apps/platform/openbao/application.yaml`
@@ -274,7 +280,7 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/seaweedfs/valu
 - Wave `2` + `SkipDryRunOnMissingResource` + `retry` : a besoin des CRDs ESO et du `ClusterSecretStore` `openbao-backend`.
 - Tant que le Secret `seaweedfs-s3-config` n'existe pas (OpenBao scellé ou secret absent), le pod reste en `ContainerCreating` : c'est normal.
 
-### `workloads/seaweedfs/s3-config.yaml`
+### `workloads/seaweedfs/s3-credentials.yaml`
 
 `ExternalSecret` `seaweedfs-s3-config` (namespace `seaweedfs`) : lit `accessKey` / `secretKey` dans le secret OpenBao `seaweedfs/s3` et génère (via un `template` ESO) la clé `seaweedfs_s3_config`, au format JSON d'identités attendu par `weed s3 -config`. Une seule identité `mlflow` avec les droits `Admin`, `Read`, `Write`, `List`, `Tagging`.
 
@@ -284,24 +290,24 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/seaweedfs/valu
 
 Application **`postgres`** (sync-wave `2`) — déploie `workloads/postgres/` **récursivement** (donc `databases/` inclus) dans `postgres`. Pas de chart : les charts Bitnami ne sont plus maintenus en libre accès, l'image officielle `postgres:17` suffit.
 
-### `workloads/postgres/server.yaml`
+### `workloads/postgres/` (serveur)
 
-- **`ExternalSecret` `postgres-admin`** : superutilisateur (`username` / `password`) lu dans OpenBao `secret/postgres/admin`.
-- **`StatefulSet` `postgres`** : 1 réplica, données sur un PVC de 10 Gi (`microk8s-hostpath`), `PGDATA` dans un sous-dossier, sondes `pg_isready`.
-- **`Service` `postgres`** (ClusterIP) : `postgres.postgres.svc:5432` depuis tout le cluster.
+- **`admin-credentials.yaml`** — `ExternalSecret` `postgres-admin` : superutilisateur (`username` / `password`) lu dans OpenBao `secret/postgres/admin`.
+- **`statefulset.yaml`** — `StatefulSet` `postgres` : 1 réplica, données sur un PVC de 10 Gi (`microk8s-hostpath`), `PGDATA` dans un sous-dossier, sondes `pg_isready`.
+- **`service.yaml`** — `Service` `postgres` (ClusterIP) : `postgres.postgres.svc:5432` depuis tout le cluster.
 
 > `POSTGRES_USER` / `POSTGRES_PASSWORD` ne sont lus **qu'à l'initialisation** du volume : changer le mot de passe admin dans OpenBao ensuite ne change pas celui de la base (il faut aussi un `ALTER ROLE`).
 
-### `workloads/postgres/databases/<appli>.yaml`
+### `workloads/postgres/databases/<appli>/`
 
-**Un fichier par application qui a besoin d'une base.** Chaque fichier contient :
+**Un dossier par application qui a besoin d'une base**, avec deux fichiers :
 
-- un **`ExternalSecret` `db-<appli>`** (namespace `postgres`) : identifiants de l'appli lus dans OpenBao `secret/<appli>/postgres` ;
-- un **`Job` `db-<appli>`**, hook ArgoCD **`PostSync`** : se connecte en superutilisateur et, de façon idempotente, crée le rôle s'il n'existe pas, **(ré)applique son mot de passe**, crée la base `<appli>` si elle n'existe pas et en donne la propriété au rôle.
+- **`credentials.yaml`** — `ExternalSecret` `db-<appli>` (namespace `postgres`) : identifiants de l'appli lus dans OpenBao `secret/<appli>/postgres` ;
+- **`create-db-job.yaml`** — `Job` `db-<appli>`, hook ArgoCD **`PostSync`** : se connecte en superutilisateur et, de façon idempotente, crée le rôle s'il n'existe pas, **(ré)applique son mot de passe**, crée la base `<appli>` si elle n'existe pas et en donne la propriété au rôle.
 
 Le Job est rejoué à **chaque sync** de l'Application `postgres` (`BeforeHookCreation`) : pour propager un changement de mot de passe fait dans OpenBao, il suffit de resynchroniser `postgres` (après le rafraîchissement de l'ExternalSecret, ≤ 1 h, ou forcé — voir [Ajouter une base](#ajouter-une-base-postgresql)).
 
-L'application cliente lit les **mêmes** identifiants OpenBao via son propre `ExternalSecret`, dans son namespace (ex. `mlflow-postgres-credentials` dans `workloads/mlflow/mlflow.yaml`), et se connecte à `postgres.postgres.svc:5432`.
+L'application cliente lit les **mêmes** identifiants OpenBao via son propre `ExternalSecret`, dans son namespace (ex. `workloads/mlflow/postgres-credentials.yaml`), et se connecte à `postgres.postgres.svc:5432`.
 
 ### `apps/platform/mlflow/application.yaml`
 
@@ -316,10 +322,10 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/mlflow/values.
 - Service du chart en ClusterIP (`mlflow.mlflow.svc:80`) ; accès externe par le Service `mlflow-nodeport` (**NodePort 30500**), car le chart ne permet pas de fixer le `nodePort`.
 - Pas d'authentification MLflow (`auth.enabled: false`).
 
-`workloads/mlflow/mlflow.yaml` contient :
-- **`ExternalSecret` `mlflow-postgres-credentials`** : `username` / `password` lus dans OpenBao `secret/mlflow/postgres` (les mêmes que ceux du Job `db-mlflow`) ;
-- **`ExternalSecret` `mlflow-s3-credentials`** : `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, lus dans le **même** secret OpenBao que SeaweedFS (`secret/seaweedfs/s3`) ;
-- **`Service` `mlflow-nodeport`**.
+`workloads/mlflow/` contient :
+- **`postgres-credentials.yaml`** — `ExternalSecret` `mlflow-postgres-credentials` : `username` / `password` lus dans OpenBao `secret/mlflow/postgres` (les mêmes que ceux du Job `db-mlflow`) ;
+- **`s3-credentials.yaml`** — `ExternalSecret` `mlflow-s3-credentials` : `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, lus dans le **même** secret OpenBao que SeaweedFS (`secret/seaweedfs/s3`) ;
+- **`nodeport.yaml`** — `Service` `mlflow-nodeport` (NodePort 30500).
 
 > Le chart crée un Secret `mlflow-flask-server-secret-key` aléatoire en hook `pre-install` (→ PreSync sous ArgoCD, recréé à chaque sync puisque `lookup` ne fonctionne pas). Sans authentification MLflow, cette clé n'a pas d'effet utile ; elle ne provoque pas d'OutOfSync.
 
@@ -332,19 +338,13 @@ Application **`prometheus`** — chart OCI `kube-prometheus-stack` **92.3.1**, r
 - `prometheus-node-exporter.hostRootFsMount.enabled: false` : le montage de la racine de l'hôte ne fonctionne pas sous WSL2.
 - `prune: true`, `selfHeal: false`, `CreateNamespace`, `ServerSideApply`.
 
-### `workloads/eso-config/eso.yaml`
+### `workloads/eso-config/cluster-secret-store.yaml`
 
-Configuration ESO de démonstration :
-
-- **`ClusterSecretStore` `openbao-backend`** (cluster-scoped, utilisable depuis n'importe quel namespace) :
-  - provider `vault` (OpenBao est compatible avec l'API Vault) ;
-  - serveur `http://openbao.openbao.svc:8200` (DNS interne du cluster) ;
-  - moteur KV **v2** monté sur `secret` ;
-  - authentification par token, lu dans le Secret **`vault-token`** (clé `token`) du namespace `external-secrets` — **à créer à la main**, voir [Prérequis manuels](#prérequis-manuels-secrets).
-- **`ExternalSecret` `db-credentials`** (namespace `production`) :
-  - lit la propriété `password` du secret OpenBao `production/db` (chemin complet `secret/data/production/db`) ;
-  - crée et maintient le Secret Kubernetes `db-credentials` (clé `password`), rafraîchi toutes les minutes ;
-  - `creationPolicy: Owner` : le Secret généré est supprimé si l'`ExternalSecret` l'est.
+**`ClusterSecretStore` `openbao-backend`** (cluster-scoped, utilisable depuis n'importe quel namespace), référencé par tous les `ExternalSecret` du repo :
+- provider `vault` (OpenBao est compatible avec l'API Vault) ;
+- serveur `http://openbao.openbao.svc:8200` (DNS interne du cluster) ;
+- moteur KV **v2** monté sur `secret` ;
+- authentification par token, lu dans le Secret **`vault-token`** (clé `token`) du namespace `external-secrets` — **à créer à la main**, voir [Prérequis manuels](#prérequis-manuels-secrets).
 
 ### `roar-k8s-helm.yaml`
 
@@ -384,7 +384,7 @@ Déroulé côté ArgoCD après le `kubectl apply -f root-app.yaml` :
 2. `root-projects` (wave `-1`) crée l'AppProject `infra`. Les autres Applications (projet `infra`) réessaient jusqu'à ce qu'il existe.
 3. `argocd` reprend la release Helm installée par le script, avec les values complètes de `manifests/argocd/values.yaml`.
 4. `external-secrets-operator` et `openbao` s'installent.
-5. `eso-config` attend les CRDs ESO, puis crée le `ClusterSecretStore` et l'`ExternalSecret`.
+5. `eso-config` attend les CRDs ESO, puis crée le `ClusterSecretStore`.
 
 ---
 
@@ -423,14 +423,7 @@ kubectl -n external-secrets create secret generic vault-token \
   --from-literal=token=<root-token>
 ```
 
-### 5. Secret de démo dans OpenBao
-
-```bash
-kubectl -n openbao exec openbao-0 -- sh -c \
-  'BAO_TOKEN=<root-token> bao kv put secret/production/db password=<mot-de-passe>'
-```
-
-### 6. Identifiants S3 de SeaweedFS
+### 5. Identifiants S3 de SeaweedFS
 
 ```bash
 kubectl -n openbao exec openbao-0 -- sh -c \
@@ -439,14 +432,14 @@ kubectl -n openbao exec openbao-0 -- sh -c \
 
 ESO crée alors le Secret `seaweedfs-s3-config` et le pod SeaweedFS démarre. Ces mêmes clés sont utilisées par MLflow (Secret `mlflow-s3-credentials`). Pour une rotation, modifier le secret dans OpenBao puis redémarrer le pod (`kubectl -n seaweedfs rollout restart deploy/seaweedfs-all-in-one`) : la config S3 n'est lue qu'au démarrage.
 
-### 7. Superutilisateur PostgreSQL
+### 6. Superutilisateur PostgreSQL
 
 ```bash
 kubectl -n openbao exec openbao-0 -- sh -c \
   'BAO_TOKEN=<root-token> bao kv put secret/postgres/admin username=postgres password=<mot-de-passe>'
 ```
 
-### 8. Identifiants de la base MLflow
+### 7. Identifiants de la base MLflow
 
 ```bash
 kubectl -n openbao exec openbao-0 -- sh -c \
@@ -461,8 +454,6 @@ Vérification :
 
 ```bash
 kubectl get clustersecretstore openbao-backend      # STATUS = Valid
-kubectl -n production get externalsecret            # STATUS = SecretSynced
-kubectl -n production get secret db-credentials -o jsonpath='{.data.password}' | base64 -d
 kubectl -n seaweedfs get externalsecret,secret seaweedfs-s3-config   # SecretSynced
 kubectl -n seaweedfs get pods                                        # seaweedfs-all-in-one-* Running
 kubectl -n postgres get externalsecret,pods                          # SecretSynced, postgres-0 Running
@@ -559,11 +550,11 @@ Pour une nouvelle application `<appli>` :
    kubectl -n openbao exec openbao-0 -- sh -c \
      'BAO_TOKEN=<root-token> bao kv put secret/<appli>/postgres username=<appli> password=<mot-de-passe>'
    ```
-2. Copier `workloads/postgres/databases/mlflow.yaml` en `workloads/postgres/databases/<appli>.yaml` et remplacer `mlflow` par `<appli>` (noms, `DB_NAME`, chemin OpenBao).
+2. Copier le dossier `workloads/postgres/databases/mlflow/` en `workloads/postgres/databases/<appli>/` et remplacer `mlflow` par `<appli>` dans les deux fichiers (noms, `DB_NAME`, chemin OpenBao).
 3. Dans les manifests de l'appli, ajouter un `ExternalSecret` sur `secret/<appli>/postgres` dans **son** namespace, et la faire pointer vers `postgres.postgres.svc:5432`, base `<appli>`.
 4. Commit + push : l'Application `postgres` se synchronise et le Job crée le rôle et la base.
 
-Retirer le fichier ne supprime **pas** la base (le Job ne fait que créer) : faire un `DROP DATABASE` / `DROP ROLE` à la main si besoin.
+Retirer le dossier ne supprime **pas** la base (le Job ne fait que créer) : faire un `DROP DATABASE` / `DROP ROLE` à la main si besoin.
 
 Pour rejouer les Jobs (ex. après un changement de mot de passe dans OpenBao) :
 
@@ -667,7 +658,7 @@ Ce repo est un **lab local**. Plusieurs choix sont inacceptables en production :
 | Point | Où | En production |
 |---|---|---|
 | OpenBao mono-instance, HTTP sans TLS, 1 seule clé d'unseal, unseal manuel | `manifests/openbao/values.yaml` | Mode HA (Raft), TLS, plusieurs clés (Shamir) ou auto-unseal |
-| ESO s'authentifie avec le token root | `workloads/eso-config/eso.yaml` + secret `vault-token` | Auth Kubernetes OpenBao + policy en lecture seule |
+| ESO s'authentifie avec le token root | `workloads/eso-config/cluster-secret-store.yaml` + secret `vault-token` | Auth Kubernetes OpenBao + policy en lecture seule |
 | Mot de passe Grafana `admin` en clair dans Git | `apps/platform/prometheus/application.yaml` | Secret externe (ESO) via `grafana.admin.existingSecret` |
 | ArgoCD en HTTP (`server.insecure: true`) | `manifests/argocd/values.yaml` + `argocd-values.yaml` (branche `bootstrap`) | TLS via Ingress |
 | Services en NodePort | plusieurs | Ingress + authentification |

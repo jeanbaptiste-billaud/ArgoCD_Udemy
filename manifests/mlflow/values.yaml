@@ -12,7 +12,7 @@ backendStore:
     database: mlflow
     driver: psycopg2
   # Identifiants lus dans le Secret cree par l'ExternalSecret de workloads/mlflow
-  # (base et role crees par workloads/postgres/databases/mlflow.yaml)
+  # (base et role crees par workloads/postgres/databases/mlflow/)
   existingDatabaseSecret:
     name: mlflow-postgres-credentials
     usernameKey: username

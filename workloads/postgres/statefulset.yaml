@@ -1,40 +1,4 @@
-# Serveur PostgreSQL partage. Superutilisateur lu dans OpenBao : secret/postgres/admin
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  name: postgres-admin
-  namespace: postgres
-spec:
-  refreshInterval: 1h
-  secretStoreRef:
-    name: openbao-backend
-    kind: ClusterSecretStore
-  target:
-    name: postgres-admin
-    creationPolicy: Owner
-  data:
-    - secretKey: username
-      remoteRef:
-        key: postgres/admin
-        property: username
-    - secretKey: password
-      remoteRef:
-        key: postgres/admin
-        property: password
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: postgres
-  namespace: postgres
-spec:
-  selector:
-    app.kubernetes.io/name: postgres
-  ports:
-    - name: postgres
-      port: 5432
-      targetPort: 5432
----
+# Serveur PostgreSQL partage (une base par appli, voir databases/)
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

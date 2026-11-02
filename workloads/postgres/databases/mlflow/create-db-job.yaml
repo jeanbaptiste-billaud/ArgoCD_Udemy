@@ -1,28 +1,3 @@
-# Base "mlflow" + role proprietaire. Identifiants lus dans OpenBao : secret/mlflow/postgres
-# Modele pour une nouvelle base : copier ce fichier et remplacer "mlflow" partout.
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  name: db-mlflow
-  namespace: postgres
-spec:
-  refreshInterval: 1h
-  secretStoreRef:
-    name: openbao-backend
-    kind: ClusterSecretStore
-  target:
-    name: db-mlflow
-    creationPolicy: Owner
-  data:
-    - secretKey: username
-      remoteRef:
-        key: mlflow/postgres
-        property: username
-    - secretKey: password
-      remoteRef:
-        key: mlflow/postgres
-        property: password
----
 # Cree le role et la base s'ils n'existent pas, et (re)applique le mot de passe.
 # Hook PostSync : rejoue a chaque sync de l'Application postgres (idempotent).
 apiVersion: batch/v1
