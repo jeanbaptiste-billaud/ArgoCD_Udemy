@@ -1,0 +1,34 @@
+# PostgreSQL partage : serveur + une base par application (workloads/postgres/databases/*.yaml)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: postgres
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"   # apres eso-config (ClusterSecretStore)
+spec:
+  project: infra
+  source:
+    repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
+    targetRevision: main
+    path: workloads/postgres
+    directory:
+      recurse: true                   # inclut databases/
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: postgres
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m

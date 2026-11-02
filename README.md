@@ -19,6 +19,7 @@ Composants déployés :
 | **External Secrets Operator (ESO)** | Synchronise des secrets externes vers des `Secret` Kubernetes | `external-secrets` |
 | **OpenBao** | Coffre-fort de secrets (fork open source de Vault), en mode standalone (stockage persistant) | `openbao` |
 | **SeaweedFS** | Stockage objet compatible S3 (mode all-in-one), stockage d'artefacts pour MLflow | `seaweedfs` |
+| **PostgreSQL** | Serveur partagé : une base par application qui en a besoin | `postgres` |
 | **kube-prometheus-stack** | Prometheus, Grafana, Alertmanager — **déploiement manuel** (voir plus bas) | `monitoring` |
 
 ---
@@ -57,6 +58,7 @@ flowchart TD
     ROOT --> ESOC[Application<br/>eso-config]
     ROOT --> BAO[Application<br/>openbao]
     ROOT --> SWFS[Application<br/>seaweedfs]
+    ROOT --> PG[Application<br/>postgres]
     ROOT -. exclu .-> PROM[Application<br/>prometheus]
 
     ARGO -->|chart argo-cd + values| ARGOCD[(ArgoCD)]
@@ -64,6 +66,7 @@ flowchart TD
     ESOC -->|workloads/eso-config| CSS[(ClusterSecretStore<br/>+ ExternalSecret)]
     BAO -->|chart openbao| BAOD[(OpenBao)]
     SWFS -->|chart seaweedfs + workloads/seaweedfs| SWFSD[(SeaweedFS S3)]
+    PG -->|workloads/postgres| PGD[(PostgreSQL)]
     PROM -.->|chart kube-prometheus-stack| PROMD[(Monitoring)]
 
     CSS -->|lit les secrets| BAOD
@@ -115,6 +118,8 @@ ArgoCD_Udemy/
 │       │   └── application.yaml       # OpenBao (chart Helm, mode standalone)
 │       ├── seaweedfs/
 │       │   └── application.yaml       # SeaweedFS S3 (chart Helm all-in-one + ExternalSecret)
+│       ├── postgres/
+│       │   └── application.yaml       # PostgreSQL partagé (serveur + une base par appli)
 │       └── prometheus/
 │           └── application.yaml       # kube-prometheus-stack — EXCLU de root
 ├── manifests/                         # values Helm référencées par des Applications ($values)
@@ -127,8 +132,11 @@ ArgoCD_Udemy/
 ├── workloads/                         # manifests "bruts" référencés par des Applications
 │   ├── eso-config/
 │   │   └── eso.yaml                   # ClusterSecretStore OpenBao + ExternalSecret de démo
-│   └── seaweedfs/
-│       └── s3-config.yaml             # ExternalSecret : config S3 de SeaweedFS depuis OpenBao
+│   ├── seaweedfs/
+│   │   └── s3-config.yaml             # ExternalSecret : config S3 de SeaweedFS depuis OpenBao
+│   └── postgres/
+│       ├── server.yaml                # ExternalSecret superutilisateur + Service + StatefulSet
+│       └── databases/                 # 1 fichier par application qui a besoin d'une base
 └── roar-k8s-helm.yaml                 # exercice du cours, NON géré par le GitOps
 ```
 
@@ -192,7 +200,7 @@ AppProject **`infra`**, utilisé par toutes les Applications plateforme. Il déf
   - `https://openbao.github.io/openbao-helm` (chart OpenBao) ;
   - `https://seaweedfs.github.io/seaweedfs/helm` (chart SeaweedFS) ;
   - `ghcr.io/prometheus-community/charts` (chart OCI kube-prometheus-stack).
-- **`destinations`** — où elles peuvent déployer : `argocd`, `external-secrets`, `openbao`, `seaweedfs`, `monitoring`, `production`, `kube-system` (certains charts y posent des composants, ex. Services de kubelet pour Prometheus).
+- **`destinations`** — où elles peuvent déployer : `argocd`, `external-secrets`, `openbao`, `seaweedfs`, `postgres`, `monitoring`, `production`, `kube-system` (certains charts y posent des composants, ex. Services de kubelet pour Prometheus).
 - **`clusterResourceWhitelist: */*`** — autorise les ressources cluster-scoped (CRDs, ClusterRoles, webhooks…), nécessaires aux opérateurs.
 - Annotation `Delete=false` : l'AppProject n'est jamais supprimé en cascade, même si `root-projects` l'est.
 
@@ -258,6 +266,29 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/seaweedfs/valu
 `ExternalSecret` `seaweedfs-s3-config` (namespace `seaweedfs`) : lit `accessKey` / `secretKey` dans le secret OpenBao `seaweedfs/s3` et génère (via un `template` ESO) la clé `seaweedfs_s3_config`, au format JSON d'identités attendu par `weed s3 -config`. Une seule identité `mlflow` avec les droits `Admin`, `Read`, `Write`, `List`, `Tagging`.
 
 > Pourquoi pas les identifiants générés par le chart ? Son Secret S3 utilise `lookup` + `randAlphaNum` pour conserver des clés aléatoires entre deux `helm upgrade`. **ArgoCD ne supporte pas `lookup`** (il fait un `helm template`) : les clés seraient régénérées à chaque sync. D'où `existingConfigSecret`.
+
+### `apps/platform/postgres/application.yaml`
+
+Application **`postgres`** (sync-wave `2`) — déploie `workloads/postgres/` **récursivement** (donc `databases/` inclus) dans `postgres`. Pas de chart : les charts Bitnami ne sont plus maintenus en libre accès, l'image officielle `postgres:17` suffit.
+
+### `workloads/postgres/server.yaml`
+
+- **`ExternalSecret` `postgres-admin`** : superutilisateur (`username` / `password`) lu dans OpenBao `secret/postgres/admin`.
+- **`StatefulSet` `postgres`** : 1 réplica, données sur un PVC de 10 Gi (`microk8s-hostpath`), `PGDATA` dans un sous-dossier, sondes `pg_isready`.
+- **`Service` `postgres`** (ClusterIP) : `postgres.postgres.svc:5432` depuis tout le cluster.
+
+> `POSTGRES_USER` / `POSTGRES_PASSWORD` ne sont lus **qu'à l'initialisation** du volume : changer le mot de passe admin dans OpenBao ensuite ne change pas celui de la base (il faut aussi un `ALTER ROLE`).
+
+### `workloads/postgres/databases/<appli>.yaml`
+
+**Un fichier par application qui a besoin d'une base.** Chaque fichier contient :
+
+- un **`ExternalSecret` `db-<appli>`** (namespace `postgres`) : identifiants de l'appli lus dans OpenBao `secret/<appli>/postgres` ;
+- un **`Job` `db-<appli>`**, hook ArgoCD **`PostSync`** : se connecte en superutilisateur et, de façon idempotente, crée le rôle s'il n'existe pas, **(ré)applique son mot de passe**, crée la base `<appli>` si elle n'existe pas et en donne la propriété au rôle.
+
+Le Job est rejoué à **chaque sync** de l'Application `postgres` (`BeforeHookCreation`) : pour propager un changement de mot de passe fait dans OpenBao, il suffit de resynchroniser `postgres` (après le rafraîchissement de l'ExternalSecret, ≤ 1 h, ou forcé — voir [Ajouter une base](#ajouter-une-base-postgresql)).
+
+L'application cliente lit les **mêmes** identifiants OpenBao via son propre `ExternalSecret`, dans son namespace, et se connecte à `postgres.postgres.svc:5432`.
 
 ### `apps/platform/prometheus/application.yaml`
 
@@ -375,6 +406,13 @@ kubectl -n openbao exec openbao-0 -- sh -c \
 
 ESO crée alors le Secret `seaweedfs-s3-config` et le pod SeaweedFS démarre. Pour une rotation, modifier le secret dans OpenBao puis redémarrer le pod (`kubectl -n seaweedfs rollout restart deploy/seaweedfs-all-in-one`) : la config S3 n'est lue qu'au démarrage.
 
+### 7. Superutilisateur PostgreSQL
+
+```bash
+kubectl -n openbao exec openbao-0 -- sh -c \
+  'BAO_TOKEN=<root-token> bao kv put secret/postgres/admin username=postgres password=<mot-de-passe>'
+```
+
 Les données sont persistées sur le PVC : elles survivent aux redémarrages (il suffit de refaire l'unseal).
 
 Vérification :
@@ -385,6 +423,8 @@ kubectl -n production get externalsecret            # STATUS = SecretSynced
 kubectl -n production get secret db-credentials -o jsonpath='{.data.password}' | base64 -d
 kubectl -n seaweedfs get externalsecret,secret seaweedfs-s3-config   # SecretSynced
 kubectl -n seaweedfs get pods                                        # seaweedfs-all-in-one-* Running
+kubectl -n postgres get externalsecret,pods                          # SecretSynced, postgres-0 Running
+kubectl -n postgres exec postgres-0 -- psql -U postgres -c '\l'    # liste des bases
 ```
 
 ---
@@ -423,7 +463,7 @@ L'annotation `argocd.argoproj.io/sync-wave` ordonne la création des objets **au
 | `-1` | `argocd` | `root` | ArgoCD avant le reste |
 | `0` | `external-secrets-operator`, `openbao` | `root` | Composants indépendants |
 | `1` | `eso-config` | `root` | A besoin des CRDs installées par l'opérateur ESO |
-| `2` | `seaweedfs` | `root` | A besoin du `ClusterSecretStore` créé par `eso-config` |
+| `2` | `seaweedfs`, `postgres` | `root` | Ont besoin du `ClusterSecretStore` créé par `eso-config` |
 
 ---
 
@@ -464,6 +504,28 @@ Pour le refaire gérer automatiquement par ArgoCD, retirer la ligne `exclude` de
 ### Mettre à jour ArgoCD
 
 Changer `targetRevision` (chart) dans `apps/platform/argocd/application.yaml` sur `main`. Commit + push. Pour que les futures installations partent de la même version, mettre aussi à jour `--version` dans `install_ArgoCD.sh` sur la branche `bootstrap`.
+
+### Ajouter une base PostgreSQL
+
+Pour une nouvelle application `<appli>` :
+
+1. Créer ses identifiants dans OpenBao :
+   ```bash
+   kubectl -n openbao exec openbao-0 -- sh -c \
+     'BAO_TOKEN=<root-token> bao kv put secret/<appli>/postgres username=<appli> password=<mot-de-passe>'
+   ```
+2. Créer `workloads/postgres/databases/<appli>.yaml` : un `ExternalSecret` `db-<appli>` sur `secret/<appli>/postgres` et un `Job` `db-<appli>` (hook `PostSync`) qui crée le rôle et la base.
+3. Dans les manifests de l'appli, ajouter un `ExternalSecret` sur `secret/<appli>/postgres` dans **son** namespace, et la faire pointer vers `postgres.postgres.svc:5432`, base `<appli>`.
+4. Commit + push : l'Application `postgres` se synchronise et le Job crée le rôle et la base.
+
+Retirer le fichier ne supprime **pas** la base (le Job ne fait que créer) : faire un `DROP DATABASE` / `DROP ROLE` à la main si besoin.
+
+Pour rejouer les Jobs (ex. après un changement de mot de passe dans OpenBao) :
+
+```bash
+kubectl -n postgres annotate externalsecret db-<appli> force-sync=$(date +%s) --overwrite   # relit OpenBao
+argocd app sync postgres                                                                   # rejoue les Jobs
+```
 
 ### Forcer un rafraîchissement
 
@@ -544,6 +606,7 @@ Ce repo est un **lab local**. Plusieurs choix sont inacceptables en production :
 | ArgoCD en HTTP (`server.insecure: true`) | `manifests/argocd/values.yaml` + `argocd-values.yaml` (branche `bootstrap`) | TLS via Ingress |
 | Services en NodePort | plusieurs | Ingress + authentification |
 | SeaweedFS mono-pod, S3 en HTTP, identité S3 unique avec droits `Admin` | `manifests/seaweedfs/values.yaml`, `workloads/seaweedfs/` | Composants séparés et répliqués, TLS, une identité par client avec droits limités au bucket |
+| PostgreSQL mono-instance sans sauvegarde | `workloads/postgres/` | Opérateur (CloudNativePG) avec réplication et sauvegardes |
 | `clusterResourceWhitelist: */*` | `projects/infra-project.yaml` | Liste restreinte des kinds nécessaires |
 
 ---

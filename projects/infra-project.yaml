@@ -25,6 +25,8 @@ spec:
     - server: https://kubernetes.default.svc
       namespace: seaweedfs         # SeaweedFS (S3 pour MLflow)
     - server: https://kubernetes.default.svc
+      namespace: postgres          # PostgreSQL partage
+    - server: https://kubernetes.default.svc
       namespace: monitoring        # kube-prometheus-stack
     - server: https://kubernetes.default.svc
       namespace: production        # ExternalSecret
