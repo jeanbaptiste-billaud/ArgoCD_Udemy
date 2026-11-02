@@ -13,7 +13,7 @@ spec:
   sources:
     - repoURL: https://seaweedfs.github.io/seaweedfs/helm
       chart: seaweedfs
-      targetRevision: 4.52.0
+      targetRevision: 4.51.0          # 4.52.0 reference l'image chrislusf/seaweedfs:4.52, absente de Docker Hub
       helm:
         valueFiles:
           - $values/manifests/seaweedfs/values.yaml

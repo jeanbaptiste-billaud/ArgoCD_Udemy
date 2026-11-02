@@ -269,7 +269,7 @@ Deux sources : le chart, et ce repo (`ref: values`) pour lire `manifests/openbao
 
 ### `apps/platform/seaweedfs/application.yaml`
 
-Application **`seaweedfs`** (sync-wave `2`) — chart officiel `seaweedfs` **4.52.0** dans `seaweedfs`, stockage S3 des artefacts MLflow.
+Application **`seaweedfs`** (sync-wave `2`) — chart officiel `seaweedfs` **4.51.0** (la 4.52.0 référence une image `4.52` non publiée sur Docker Hub) dans `seaweedfs`, stockage S3 des artefacts MLflow.
 
 Trois sources : le chart, ce repo (`ref: values`) pour `manifests/seaweedfs/values.yaml`, et ce repo (`path: workloads/seaweedfs`) pour l'`ExternalSecret` des identifiants S3.
 
