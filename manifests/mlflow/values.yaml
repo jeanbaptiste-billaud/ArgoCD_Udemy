@@ -1,0 +1,45 @@
+# MLflow (chart community-charts) : metadonnees dans PostgreSQL, artefacts dans SeaweedFS (S3)
+# Image burakince/mlflow : inclut psycopg2 et boto3 (absents de l'image officielle)
+
+# Metadonnees (runs, experiences, registre de modeles) -> PostgreSQL
+backendStore:
+  databaseMigration: true          # init container "mlflow db upgrade"
+  databaseConnectionCheck: true    # init container qui attend que Postgres reponde
+  postgres:
+    enabled: true
+    host: postgres.postgres.svc     # PostgreSQL partage (Application postgres)
+    port: 5432
+    database: mlflow
+    driver: psycopg2
+  # Identifiants lus dans le Secret cree par l'ExternalSecret de workloads/mlflow
+  # (base et role crees par workloads/postgres/databases/mlflow.yaml)
+  existingDatabaseSecret:
+    name: mlflow-postgres-credentials
+    usernameKey: username
+    passwordKey: password
+
+# Artefacts -> bucket "mlflow" de SeaweedFS, servis en proxy par MLflow :
+# les clients n'ont besoin ni des identifiants S3 ni d'acceder a SeaweedFS.
+artifactRoot:
+  proxiedArtifactStorage: true
+  s3:
+    enabled: true
+    bucket: mlflow
+    existingSecret:
+      name: mlflow-s3-credentials
+      keyOfAccessKeyId: AWS_ACCESS_KEY_ID
+      keyOfSecretAccessKey: AWS_SECRET_ACCESS_KEY
+
+extraEnvVars:
+  MLFLOW_S3_ENDPOINT_URL: http://seaweedfs-all-in-one.seaweedfs.svc:8333
+  AWS_DEFAULT_REGION: us-east-1    # valeur quelconque, exigee par boto3
+
+# MLflow 3 rejette les requetes dont l'en-tete Host n'est pas autorise
+# (protection DNS rebinding). Lab : tout autoriser.
+serverAllowedHosts:
+  - "*"
+
+# Service ClusterIP du chart (le chart ne permet pas de fixer un nodePort) :
+# l'acces externe passe par le Service NodePort de workloads/mlflow.
+service:
+  type: ClusterIP

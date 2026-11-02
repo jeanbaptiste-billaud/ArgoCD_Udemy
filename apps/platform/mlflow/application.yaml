@@ -1,0 +1,41 @@
+# MLflow : chart community-charts + values + ExternalSecrets (Postgres, S3) / Service NodePort
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mlflow
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"   # apres postgres et seaweedfs
+spec:
+  project: infra
+  sources:
+    - repoURL: https://community-charts.github.io/helm-charts
+      chart: mlflow
+      targetRevision: 1.11.7
+      helm:
+        valueFiles:
+          - $values/manifests/mlflow/values.yaml
+    - repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
+      targetRevision: main
+      ref: values                     # lecture de manifests/mlflow/values.yaml
+    - repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
+      targetRevision: main
+      path: workloads/mlflow          # ExternalSecrets + Service NodePort
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mlflow
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m

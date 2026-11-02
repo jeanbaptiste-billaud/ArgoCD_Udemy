@@ -19,7 +19,8 @@ Composants déployés :
 | **External Secrets Operator (ESO)** | Synchronise des secrets externes vers des `Secret` Kubernetes | `external-secrets` |
 | **OpenBao** | Coffre-fort de secrets (fork open source de Vault), en mode standalone (stockage persistant) | `openbao` |
 | **SeaweedFS** | Stockage objet compatible S3 (mode all-in-one), stockage d'artefacts pour MLflow | `seaweedfs` |
-| **PostgreSQL** | Serveur partagé : une base par application qui en a besoin | `postgres` |
+| **PostgreSQL** | Serveur partagé : une base par application qui en a besoin (MLflow, …) | `postgres` |
+| **MLflow** | Suivi d'expériences et registre de modèles ; artefacts dans SeaweedFS | `mlflow` |
 | **kube-prometheus-stack** | Prometheus, Grafana, Alertmanager — **déploiement manuel** (voir plus bas) | `monitoring` |
 
 ---
@@ -59,6 +60,7 @@ flowchart TD
     ROOT --> BAO[Application<br/>openbao]
     ROOT --> SWFS[Application<br/>seaweedfs]
     ROOT --> PG[Application<br/>postgres]
+    ROOT --> MLF[Application<br/>mlflow]
     ROOT -. exclu .-> PROM[Application<br/>prometheus]
 
     ARGO -->|chart argo-cd + values| ARGOCD[(ArgoCD)]
@@ -67,6 +69,9 @@ flowchart TD
     BAO -->|chart openbao| BAOD[(OpenBao)]
     SWFS -->|chart seaweedfs + workloads/seaweedfs| SWFSD[(SeaweedFS S3)]
     PG -->|workloads/postgres| PGD[(PostgreSQL)]
+    MLF -->|chart mlflow + workloads/mlflow| MLFD[(MLflow)]
+    MLFD -->|base mlflow| PGD
+    MLFD -->|artefacts s3://mlflow| SWFSD
     PROM -.->|chart kube-prometheus-stack| PROMD[(Monitoring)]
 
     CSS -->|lit les secrets| BAOD
@@ -120,6 +125,8 @@ ArgoCD_Udemy/
 │       │   └── application.yaml       # SeaweedFS S3 (chart Helm all-in-one + ExternalSecret)
 │       ├── postgres/
 │       │   └── application.yaml       # PostgreSQL partagé (serveur + une base par appli)
+│       ├── mlflow/
+│       │   └── application.yaml       # MLflow (chart Helm + manifests)
 │       └── prometheus/
 │           └── application.yaml       # kube-prometheus-stack — EXCLU de root
 ├── manifests/                         # values Helm référencées par des Applications ($values)
@@ -127,16 +134,21 @@ ArgoCD_Udemy/
 │   │   └── values.yaml                # values complètes d'ArgoCD
 │   ├── openbao/
 │   │   └── values.yaml
-│   └── seaweedfs/
+│   ├── seaweedfs/
+│   │   └── values.yaml
+│   └── mlflow/
 │       └── values.yaml
 ├── workloads/                         # manifests "bruts" référencés par des Applications
 │   ├── eso-config/
 │   │   └── eso.yaml                   # ClusterSecretStore OpenBao + ExternalSecret de démo
 │   ├── seaweedfs/
 │   │   └── s3-config.yaml             # ExternalSecret : config S3 de SeaweedFS depuis OpenBao
-│   └── postgres/
-│       ├── server.yaml                # ExternalSecret superutilisateur + Service + StatefulSet
-│       └── databases/                 # 1 fichier par application qui a besoin d'une base
+│   ├── postgres/
+│   │   ├── server.yaml                # ExternalSecret superutilisateur + Service + StatefulSet
+│   │   └── databases/                 # 1 fichier par application qui a besoin d'une base
+│   │       └── mlflow.yaml            # ExternalSecret + Job : rôle et base "mlflow"
+│   └── mlflow/
+│       └── mlflow.yaml                # ExternalSecrets (Postgres, S3) + Service NodePort de MLflow
 └── roar-k8s-helm.yaml                 # exercice du cours, NON géré par le GitOps
 ```
 
@@ -199,8 +211,9 @@ AppProject **`infra`**, utilisé par toutes les Applications plateforme. Il déf
   - `https://charts.external-secrets.io` (chart ESO) ;
   - `https://openbao.github.io/openbao-helm` (chart OpenBao) ;
   - `https://seaweedfs.github.io/seaweedfs/helm` (chart SeaweedFS) ;
+  - `https://community-charts.github.io/helm-charts` (chart MLflow) ;
   - `ghcr.io/prometheus-community/charts` (chart OCI kube-prometheus-stack).
-- **`destinations`** — où elles peuvent déployer : `argocd`, `external-secrets`, `openbao`, `seaweedfs`, `postgres`, `monitoring`, `production`, `kube-system` (certains charts y posent des composants, ex. Services de kubelet pour Prometheus).
+- **`destinations`** — où elles peuvent déployer : `argocd`, `external-secrets`, `openbao`, `seaweedfs`, `postgres`, `mlflow`, `monitoring`, `production`, `kube-system` (certains charts y posent des composants, ex. Services de kubelet pour Prometheus).
 - **`clusterResourceWhitelist: */*`** — autorise les ressources cluster-scoped (CRDs, ClusterRoles, webhooks…), nécessaires aux opérateurs.
 - Annotation `Delete=false` : l'AppProject n'est jamais supprimé en cascade, même si `root-projects` l'est.
 
@@ -288,7 +301,27 @@ Application **`postgres`** (sync-wave `2`) — déploie `workloads/postgres/` **
 
 Le Job est rejoué à **chaque sync** de l'Application `postgres` (`BeforeHookCreation`) : pour propager un changement de mot de passe fait dans OpenBao, il suffit de resynchroniser `postgres` (après le rafraîchissement de l'ExternalSecret, ≤ 1 h, ou forcé — voir [Ajouter une base](#ajouter-une-base-postgresql)).
 
-L'application cliente lit les **mêmes** identifiants OpenBao via son propre `ExternalSecret`, dans son namespace, et se connecte à `postgres.postgres.svc:5432`.
+L'application cliente lit les **mêmes** identifiants OpenBao via son propre `ExternalSecret`, dans son namespace (ex. `mlflow-postgres-credentials` dans `workloads/mlflow/mlflow.yaml`), et se connecte à `postgres.postgres.svc:5432`.
+
+### `apps/platform/mlflow/application.yaml`
+
+Application **`mlflow`** (sync-wave `3`) — chart `mlflow` **1.11.7** de community-charts (MLflow **3.16.0**) dans `mlflow`.
+
+Trois sources : le chart, ce repo (`ref: values`) pour `manifests/mlflow/values.yaml`, et ce repo (`path: workloads/mlflow`).
+
+- Image `burakince/mlflow` : contrairement à l'image officielle, elle embarque `psycopg2` (PostgreSQL) et `boto3` (S3).
+- **Métadonnées** dans la base `mlflow` du PostgreSQL partagé (`backendStore.postgres` + `existingDatabaseSecret`). Deux init containers : l'un attend que Postgres réponde, l'autre crée/migre le schéma.
+- **Artefacts** dans `s3://mlflow` sur SeaweedFS (`MLFLOW_S3_ENDPOINT_URL`), en **mode proxy** (`--serve-artifacts`) : les clients envoient leurs artefacts à MLflow, qui les écrit dans S3. Les clients n'ont besoin ni des identifiants S3 ni d'un accès à SeaweedFS.
+- `serverAllowedHosts: ["*"]` : MLflow 3 rejette les requêtes dont l'en-tête `Host` n'est pas autorisé (403). Sans ça, l'accès par `<IP>:30500` ou par le nom DNS du Service échouerait.
+- Service du chart en ClusterIP (`mlflow.mlflow.svc:80`) ; accès externe par le Service `mlflow-nodeport` (**NodePort 30500**), car le chart ne permet pas de fixer le `nodePort`.
+- Pas d'authentification MLflow (`auth.enabled: false`).
+
+`workloads/mlflow/mlflow.yaml` contient :
+- **`ExternalSecret` `mlflow-postgres-credentials`** : `username` / `password` lus dans OpenBao `secret/mlflow/postgres` (les mêmes que ceux du Job `db-mlflow`) ;
+- **`ExternalSecret` `mlflow-s3-credentials`** : `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, lus dans le **même** secret OpenBao que SeaweedFS (`secret/seaweedfs/s3`) ;
+- **`Service` `mlflow-nodeport`**.
+
+> Le chart crée un Secret `mlflow-flask-server-secret-key` aléatoire en hook `pre-install` (→ PreSync sous ArgoCD, recréé à chaque sync puisque `lookup` ne fonctionne pas). Sans authentification MLflow, cette clé n'a pas d'effet utile ; elle ne provoque pas d'OutOfSync.
 
 ### `apps/platform/prometheus/application.yaml`
 
@@ -404,7 +437,7 @@ kubectl -n openbao exec openbao-0 -- sh -c \
   'BAO_TOKEN=<root-token> bao kv put secret/seaweedfs/s3 accessKey=<access-key> secretKey=<secret-key>'
 ```
 
-ESO crée alors le Secret `seaweedfs-s3-config` et le pod SeaweedFS démarre. Pour une rotation, modifier le secret dans OpenBao puis redémarrer le pod (`kubectl -n seaweedfs rollout restart deploy/seaweedfs-all-in-one`) : la config S3 n'est lue qu'au démarrage.
+ESO crée alors le Secret `seaweedfs-s3-config` et le pod SeaweedFS démarre. Ces mêmes clés sont utilisées par MLflow (Secret `mlflow-s3-credentials`). Pour une rotation, modifier le secret dans OpenBao puis redémarrer le pod (`kubectl -n seaweedfs rollout restart deploy/seaweedfs-all-in-one`) : la config S3 n'est lue qu'au démarrage.
 
 ### 7. Superutilisateur PostgreSQL
 
@@ -412,6 +445,15 @@ ESO crée alors le Secret `seaweedfs-s3-config` et le pod SeaweedFS démarre. Po
 kubectl -n openbao exec openbao-0 -- sh -c \
   'BAO_TOKEN=<root-token> bao kv put secret/postgres/admin username=postgres password=<mot-de-passe>'
 ```
+
+### 8. Identifiants de la base MLflow
+
+```bash
+kubectl -n openbao exec openbao-0 -- sh -c \
+  'BAO_TOKEN=<root-token> bao kv put secret/mlflow/postgres username=mlflow password=<mot-de-passe>'
+```
+
+Le Job `db-mlflow` crée alors le rôle et la base `mlflow` ; MLflow s'y connecte avec les mêmes identifiants.
 
 Les données sont persistées sur le PVC : elles survivent aux redémarrages (il suffit de refaire l'unseal).
 
@@ -424,7 +466,8 @@ kubectl -n production get secret db-credentials -o jsonpath='{.data.password}' |
 kubectl -n seaweedfs get externalsecret,secret seaweedfs-s3-config   # SecretSynced
 kubectl -n seaweedfs get pods                                        # seaweedfs-all-in-one-* Running
 kubectl -n postgres get externalsecret,pods                          # SecretSynced, postgres-0 Running
-kubectl -n postgres exec postgres-0 -- psql -U postgres -c '\l'    # liste des bases
+kubectl -n postgres exec postgres-0 -- psql -U postgres -c '\l'    # la base mlflow existe
+kubectl -n mlflow get externalsecret,pods                            # SecretSynced, mlflow-* Running
 ```
 
 ---
@@ -442,6 +485,7 @@ kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP
 | ArgoCD | `http://<IP>:30080` | `admin` / `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' \| base64 -d` |
 | OpenBao | `http://<IP>:30200` | root token obtenu au `bao operator init` |
 | SeaweedFS S3 | `http://<IP>:30333` | `accessKey` / `secretKey` de `secret/seaweedfs/s3` |
+| MLflow | `http://<IP>:30500` | — (pas d'authentification) |
 | Prometheus | `http://<IP>:30060` | — (si déployé) |
 | Grafana | `http://<IP>:30070` | `admin` / `admin` (si déployé) |
 
@@ -464,6 +508,7 @@ L'annotation `argocd.argoproj.io/sync-wave` ordonne la création des objets **au
 | `0` | `external-secrets-operator`, `openbao` | `root` | Composants indépendants |
 | `1` | `eso-config` | `root` | A besoin des CRDs installées par l'opérateur ESO |
 | `2` | `seaweedfs`, `postgres` | `root` | Ont besoin du `ClusterSecretStore` créé par `eso-config` |
+| `3` | `mlflow` | `root` | A besoin de PostgreSQL et de SeaweedFS (bucket `mlflow`) |
 
 ---
 
@@ -514,7 +559,7 @@ Pour une nouvelle application `<appli>` :
    kubectl -n openbao exec openbao-0 -- sh -c \
      'BAO_TOKEN=<root-token> bao kv put secret/<appli>/postgres username=<appli> password=<mot-de-passe>'
    ```
-2. Créer `workloads/postgres/databases/<appli>.yaml` : un `ExternalSecret` `db-<appli>` sur `secret/<appli>/postgres` et un `Job` `db-<appli>` (hook `PostSync`) qui crée le rôle et la base.
+2. Copier `workloads/postgres/databases/mlflow.yaml` en `workloads/postgres/databases/<appli>.yaml` et remplacer `mlflow` par `<appli>` (noms, `DB_NAME`, chemin OpenBao).
 3. Dans les manifests de l'appli, ajouter un `ExternalSecret` sur `secret/<appli>/postgres` dans **son** namespace, et la faire pointer vers `postgres.postgres.svc:5432`, base `<appli>`.
 4. Commit + push : l'Application `postgres` se synchronise et le Job crée le rôle et la base.
 
@@ -525,6 +570,27 @@ Pour rejouer les Jobs (ex. après un changement de mot de passe dans OpenBao) :
 ```bash
 kubectl -n postgres annotate externalsecret db-<appli> force-sync=$(date +%s) --overwrite   # relit OpenBao
 argocd app sync postgres                                                                   # rejoue les Jobs
+```
+
+### Utiliser MLflow
+
+Depuis l'hôte (ou un notebook) — seule l'URL du serveur est nécessaire, les artefacts passent par MLflow :
+
+```python
+import mlflow
+mlflow.set_tracking_uri("http://<IP>:30500")    # dans le cluster : http://mlflow.mlflow.svc
+mlflow.set_experiment("demo")
+with mlflow.start_run():
+    mlflow.log_param("alpha", 0.5)
+    mlflow.log_metric("rmse", 0.42)
+    mlflow.log_text("hello", "hello.txt")      # artefact -> s3://mlflow sur SeaweedFS
+```
+
+Vérifier que l'artefact est bien dans SeaweedFS :
+
+```bash
+AWS_ACCESS_KEY_ID=<access-key> AWS_SECRET_ACCESS_KEY=<secret-key> \
+  aws --endpoint-url http://<IP>:30333 s3 ls --recursive s3://mlflow
 ```
 
 ### Forcer un rafraîchissement
@@ -606,6 +672,7 @@ Ce repo est un **lab local**. Plusieurs choix sont inacceptables en production :
 | ArgoCD en HTTP (`server.insecure: true`) | `manifests/argocd/values.yaml` + `argocd-values.yaml` (branche `bootstrap`) | TLS via Ingress |
 | Services en NodePort | plusieurs | Ingress + authentification |
 | SeaweedFS mono-pod, S3 en HTTP, identité S3 unique avec droits `Admin` | `manifests/seaweedfs/values.yaml`, `workloads/seaweedfs/` | Composants séparés et répliqués, TLS, une identité par client avec droits limités au bucket |
+| MLflow sans authentification, `serverAllowedHosts: *` | `manifests/mlflow/values.yaml` | `auth`/OIDC activé, liste d'hôtes explicite, Ingress TLS |
 | PostgreSQL mono-instance sans sauvegarde | `workloads/postgres/` | Opérateur (CloudNativePG) avec réplication et sauvegardes |
 | `clusterResourceWhitelist: */*` | `projects/infra-project.yaml` | Liste restreinte des kinds nécessaires |
 
@@ -622,4 +689,5 @@ Ce repo est un **lab local**. Plusieurs choix sont inacceptables en production :
 - External Secrets Operator : <https://external-secrets.io/>
 - OpenBao : <https://openbao.org/>
 - SeaweedFS (chart Helm) : <https://github.com/seaweedfs/seaweedfs/tree/master/k8s/charts/seaweedfs>
+- MLflow (chart community-charts) : <https://community-charts.github.io/docs/charts/mlflow/usage>
 - MLflow — stockage d'artefacts S3 : <https://mlflow.org/docs/latest/self-hosting/architecture/artifact-store/>

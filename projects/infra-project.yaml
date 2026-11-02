@@ -13,6 +13,7 @@ spec:
     - https://charts.external-secrets.io
     - https://openbao.github.io/openbao-helm
     - https://seaweedfs.github.io/seaweedfs/helm
+    - https://community-charts.github.io/helm-charts
     - ghcr.io/prometheus-community/charts
   # Un namespace par application
   destinations:
@@ -26,6 +27,8 @@ spec:
       namespace: seaweedfs         # SeaweedFS (S3 pour MLflow)
     - server: https://kubernetes.default.svc
       namespace: postgres          # PostgreSQL partage
+    - server: https://kubernetes.default.svc
+      namespace: mlflow            # MLflow
     - server: https://kubernetes.default.svc
       namespace: monitoring        # kube-prometheus-stack
     - server: https://kubernetes.default.svc

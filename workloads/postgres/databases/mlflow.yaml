@@ -1,0 +1,84 @@
+# Base "mlflow" + role proprietaire. Identifiants lus dans OpenBao : secret/mlflow/postgres
+# Modele pour une nouvelle base : copier ce fichier et remplacer "mlflow" partout.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: db-mlflow
+  namespace: postgres
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: openbao-backend
+    kind: ClusterSecretStore
+  target:
+    name: db-mlflow
+    creationPolicy: Owner
+  data:
+    - secretKey: username
+      remoteRef:
+        key: mlflow/postgres
+        property: username
+    - secretKey: password
+      remoteRef:
+        key: mlflow/postgres
+        property: password
+---
+# Cree le role et la base s'ils n'existent pas, et (re)applique le mot de passe.
+# Hook PostSync : rejoue a chaque sync de l'Application postgres (idempotent).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-mlflow
+  namespace: postgres
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-db
+          image: postgres:17
+          env:
+            - name: DB_NAME
+              value: mlflow
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-mlflow
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-mlflow
+                  key: password
+            # Connexion en superutilisateur (variables libpq)
+            - name: PGHOST
+              value: postgres.postgres.svc
+            - name: PGDATABASE
+              value: postgres
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-admin
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-admin
+                  key: password
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready; do echo "attente de postgres..."; sleep 2; done
+              psql -v ON_ERROR_STOP=1 -v db="$DB_NAME" -v user="$DB_USER" -v pass="$DB_PASSWORD" <<'SQL'
+              SELECT format('CREATE ROLE %I LOGIN', :'user')
+                WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'user') \gexec
+              SELECT format('ALTER ROLE %I WITH LOGIN PASSWORD %L', :'user', :'pass') \gexec
+              SELECT format('CREATE DATABASE %I OWNER %I', :'db', :'user')
+                WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = :'db') \gexec
+              SELECT format('ALTER DATABASE %I OWNER TO %I', :'db', :'user') \gexec
+              SQL
