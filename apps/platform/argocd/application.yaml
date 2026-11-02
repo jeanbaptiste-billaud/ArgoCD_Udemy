@@ -1,8 +1,7 @@
 # ArgoCD gere par lui-meme :
-#   - source 1 : chart Helm argo-cd, avec les values de bootstrap/argocd-values.yaml
+#   - source 1 : chart Helm argo-cd, avec les values de manifests/argocd/values.yaml
 #   - source 2 : le repo Git, reference $values pour lire ces values
-#   - source 3 : bootstrap/root-app.yaml (root-projects + root-apps) pour
-#                que le bootstrap soit lui aussi synchronise depuis Git
+# Le premier install (values minimales) est fait par la branche bootstrap.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -17,19 +16,14 @@ spec:
   sources:
     - repoURL: https://argoproj.github.io/argo-helm
       chart: argo-cd
-      targetRevision: 10.1.3          # meme version que install_ArgoCD.sh
+      targetRevision: 10.1.3          # meme version que install_ArgoCD.sh (branche bootstrap)
       helm:
         releaseName: argocd           # meme nom que le helm install initial
         valueFiles:
-          - $values/bootstrap/argocd-values.yaml
+          - $values/manifests/argocd/values.yaml
     - repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
       targetRevision: main
       ref: values
-    - repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
-      targetRevision: main
-      path: bootstrap
-      directory:
-        include: root-app.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd

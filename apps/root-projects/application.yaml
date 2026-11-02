@@ -1,0 +1,31 @@
+# Application root-projects : synchronise projects/ (AppProjects).
+# Creee par l'Application racine "root" (branche bootstrap, root-app.yaml).
+# Wave -1 : l'AppProject "infra" doit exister avant les autres Applications.
+# Projet "default" : "infra" n'existe pas encore tant que celle-ci n'a pas tourne.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root-projects
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: Delete=false   # protege les AppProjects
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
+    targetRevision: main
+    path: projects
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

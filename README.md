@@ -2,7 +2,14 @@
 
 Lab GitOps d'un cluster Kubernetes local (MicroK8s sous WSL2), entièrement piloté par **ArgoCD** selon le pattern **app-of-apps**.
 
-Une fois le bootstrap effectué, **Git est la seule source de vérité** : toute modification du cluster passe par un commit sur `main`, qu'ArgoCD applique automatiquement.
+Le repo a **deux branches** :
+
+| Branche | Contenu | Usage |
+|---|---|---|
+| **`bootstrap`** | Scripts d'installation (MicroK8s, ArgoCD) + `root-app.yaml` | Téléchargée une seule fois pour installer le cluster |
+| **`main`** | Toutes les Applications et leur configuration | Seule source de vérité ensuite |
+
+Une fois le bootstrap effectué, **Git est la seule source de vérité** : toute modification du cluster passe par un commit sur `main`, qu'ArgoCD applique automatiquement. `main` ne dépend jamais de la branche `bootstrap`.
 
 Composants déployés :
 
@@ -35,23 +42,22 @@ Composants déployés :
 
 ```mermaid
 flowchart TD
-    subgraph manuel["Appliqué une seule fois à la main"]
-        RA[bootstrap/root-app.yaml]
+    subgraph manuel["Branche bootstrap — appliqué une seule fois à la main"]
+        RA[root-app.yaml]
     end
 
-    RA --> RP[Application<br/>root-projects]
-    RA --> RAPPS[Application<br/>root-apps]
+    RA --> ROOT[Application<br/>root]
 
+    ROOT -->|synchronise main:apps/ récursivement| RP[Application<br/>root-projects]
     RP -->|synchronise projects/| PRJ[AppProject<br/>infra]
 
-    RAPPS -->|synchronise apps/ récursivement| ARGO[Application<br/>argocd]
-    RAPPS --> ESO[Application<br/>external-secrets-operator]
-    RAPPS --> ESOC[Application<br/>eso-config]
-    RAPPS --> BAO[Application<br/>openbao]
-    RAPPS -. exclu .-> PROM[Application<br/>prometheus]
+    ROOT --> ARGO[Application<br/>argocd]
+    ROOT --> ESO[Application<br/>external-secrets-operator]
+    ROOT --> ESOC[Application<br/>eso-config]
+    ROOT --> BAO[Application<br/>openbao]
+    ROOT -. exclu .-> PROM[Application<br/>prometheus]
 
     ARGO -->|chart argo-cd + values| ARGOCD[(ArgoCD)]
-    ARGO -->|re-synchronise| RA
     ESO -->|chart external-secrets| ESOD[(ESO)]
     ESOC -->|workloads/eso-config| CSS[(ClusterSecretStore<br/>+ ExternalSecret)]
     BAO -->|chart openbao| BAOD[(OpenBao)]
@@ -62,27 +68,37 @@ flowchart TD
 
 Points clés :
 
-- **`root-app.yaml` est le seul fichier appliqué à la main.** Il crée deux Applications « racines » :
-  - `root-projects` → synchronise le dossier `projects/` (les **AppProjects**) ;
-  - `root-apps` → synchronise le dossier `apps/` (toutes les **Applications**).
-- **ArgoCD se gère lui-même** : l'Application `argocd` déploie le chart Helm d'ArgoCD *et* re-synchronise `bootstrap/root-app.yaml`. Le bootstrap lui-même est donc versionné et appliqué depuis Git.
+- **`root-app.yaml` (branche `bootstrap`) est le seul fichier appliqué à la main.** Il crée l'Application racine **`root`**, qui synchronise `main:apps/`. Tout le reste en découle :
+  - `root-projects` (définie dans `apps/root-projects/`) → synchronise `projects/` (les **AppProjects**) ;
+  - les autres fichiers de `apps/` → toutes les **Applications** plateforme.
+- **`root` n'est pas surveillée par ArgoCD** : ajouter une app ne demande aucune action sur la branche `bootstrap`. On ne réapplique `root-app.yaml` que pour modifier `root` elle-même.
+- **ArgoCD se gère lui-même** : l'Application `argocd` reprend la release Helm installée par le script de bootstrap, avec les values de `manifests/argocd/values.yaml`.
 - Chaque composant est une **Application séparée** (une « tuile » dans l'UI ArgoCD), ce qui permet de les synchroniser, diagnostiquer ou supprimer indépendamment.
 
 ---
 
 ## Structure du repo
 
+Branche **`bootstrap`** (voir son propre README) :
+
+```
+├── README.md
+├── install_kub_microk8s.sh            # 1. installe MicroK8s sous WSL2
+├── install_ArgoCD.sh                  # 2. installe ArgoCD (Helm) + CLI + applique root-app.yaml
+├── argocd-values.yaml                 # values Helm MINIMALES du premier install
+└── root-app.yaml                      # 3. point d'entrée GitOps : Application "root" -> main:apps/
+```
+
+Branche **`main`** :
+
 ```
 ArgoCD_Udemy/
 ├── README.md                          # ce fichier
-├── bootstrap/                         # tout ce qui sert à démarrer le cluster
-│   ├── install_kub_microk8s.sh        # 1. installe MicroK8s sous WSL2
-│   ├── install_ArgoCD.sh              # 2. installe ArgoCD (Helm) + CLI + applique root-app.yaml
-│   ├── argocd-values.yaml             # values Helm d'ArgoCD (utilisées par le script ET par l'app argocd)
-│   └── root-app.yaml                  # 3. point d'entrée GitOps : root-projects + root-apps
 ├── projects/                          # AppProjects — synchronisé par root-projects
 │   └── infra-project.yaml             # AppProject "infra" (droits des apps plateforme)
-├── apps/                              # Applications ArgoCD — synchronisé par root-apps (récursif)
+├── apps/                              # Applications ArgoCD — synchronisé par root (récursif)
+│   ├── root-projects/
+│   │   └── application.yaml           # synchronise projects/ (wave -1)
 │   └── platform/                      # composants d'infrastructure
 │       ├── argocd/
 │       │   └── application.yaml       # ArgoCD qui se gère lui-même
@@ -94,7 +110,12 @@ ArgoCD_Udemy/
 │       ├── openbao/
 │       │   └── application.yaml       # OpenBao (chart Helm, mode dev)
 │       └── prometheus/
-│           └── application.yaml       # kube-prometheus-stack — EXCLU de root-apps
+│           └── application.yaml       # kube-prometheus-stack — EXCLU de root
+├── manifests/                         # values Helm référencées par des Applications ($values)
+│   ├── argocd/
+│   │   └── values.yaml                # values complètes d'ArgoCD
+│   └── openbao/
+│       └── values.yaml
 ├── workloads/                         # manifests "bruts" référencés par des Applications
 │   └── eso-config/
 │       └── eso.yaml                   # ClusterSecretStore OpenBao + ExternalSecret de démo
@@ -105,9 +126,10 @@ ArgoCD_Udemy/
 
 | Dossier | Contient | Synchronisé par | Règle |
 |---|---|---|---|
-| `bootstrap/` | Scripts d'installation + point d'entrée | appliqué à la main, puis par l'app `argocd` | Ne contient que ce qui est nécessaire *avant* qu'ArgoCD tourne |
+| branche `bootstrap` | Scripts d'installation + point d'entrée | appliqué à la main, une fois | Ne contient que ce qui est nécessaire *avant* qu'ArgoCD tourne |
 | `projects/` | Uniquement des `AppProject` | `root-projects` | Un fichier par projet |
-| `apps/` | Uniquement des `Application` ArgoCD | `root-apps` (récursif) | Un dossier par composant, un fichier `application.yaml` |
+| `apps/` | Uniquement des `Application` ArgoCD | `root` (récursif) | Un dossier par composant, un fichier `application.yaml`. **Aucun autre YAML** (sinon `root` essaie de l'appliquer) |
+| `manifests/` | Fichiers de values Helm | lus via `$values` par une Application | Jamais synchronisé directement |
 | `workloads/` | Manifests Kubernetes classiques | une Application de `apps/` qui pointe dessus | Jamais synchronisé directement par une app racine |
 
 > ⚠️ Un objet Kubernetes ne doit être défini **qu'à un seul endroit**. Si deux Applications gèrent le même objet, elles le réécrivent chacune leur tour et passent en OutOfSync en boucle (c'est arrivé avec l'AppProject `infra`, voir [Pièges connus](#choix-techniques-et-pièges-connus)).
@@ -116,34 +138,30 @@ ArgoCD_Udemy/
 
 ## Description détaillée des fichiers
 
-### `bootstrap/install_kub_microk8s.sh`
+### Branche `bootstrap`
 
-Installe un cluster Kubernetes mono-nœud **MicroK8s** dans WSL2.
+Décrite en détail dans le README de la branche. En résumé :
 
-- ⚠️ **Désactiver l'intégration Docker Desktop dans WSL2 avant de lancer le script.**
-- Installe MicroK8s via `snap`, attend qu'il soit prêt.
-- Active les addons `dns`, `storage` (StorageClass hostpath pour les PVC) et `dashboard`.
-- Crée les alias `kubectl` → `microk8s kubectl` et `helm` → `microk8s helm` dans `~/.bashrc`.
-- Lance un pod `hello-world` de test puis le supprime.
+- **`install_kub_microk8s.sh`** — installe MicroK8s sous WSL2 (⚠️ désactiver d'abord l'intégration Docker Desktop), addons `dns`, `storage`, `dashboard`, alias `kubectl`/`helm`.
+- **`install_ArgoCD.sh`** — `helm install` du chart `argo-cd` **10.1.3** (release `argocd`) avec des values **minimales**, installe la CLI `argocd` **v3.4.5**, se connecte, puis applique `root-app.yaml`.
+- **`argocd-values.yaml`** — values minimales du premier install (NodePort `30080`, HTTP). Pas de `ServiceMonitor` : leur CRD n'existe pas encore.
+- **`root-app.yaml`** — Application racine **`root`** (projet `default`) : synchronise `main:apps/` récursivement, exclut `platform/prometheus/*`, `prune` + `selfHeal`, finalizer.
 
-### `bootstrap/install_ArgoCD.sh`
+> ⚠️ `root` a `prune: true` et un finalizer : **supprimer ou exclure un fichier de `apps/` supprime l'Application correspondante et toutes les ressources qu'elle a déployées**. Supprimer `root` elle-même supprimerait tout le cluster applicatif.
 
-Installe ArgoCD puis amorce le GitOps. **À lancer depuis la racine du repo** (les chemins `bootstrap/...` sont relatifs).
+> Le nom de release `argocd` et la version `10.1.3` doivent rester **identiques** entre `install_ArgoCD.sh` et `apps/platform/argocd/application.yaml`, sinon ArgoCD installerait une seconde copie de lui-même au lieu de reprendre la release existante.
 
-1. Ajoute le repo Helm `argo` et installe le chart `argo-cd` **10.1.3** (release `argocd`, namespace `argocd`) avec `bootstrap/argocd-values.yaml`.
-2. Désactive temporairement les `ServiceMonitor` (`--set ...serviceMonitor.enabled=false`) : leur CRD n'existe pas tant que Prometheus n'est pas installé, et le `helm install` échouerait.
-3. Attend que `argocd-server` soit prêt.
-4. Installe la CLI `argocd` **v3.4.5** dans `/usr/local/bin`.
-5. Affiche le mot de passe admin initial (secret `argocd-initial-admin-secret`) et l'IP du nœud.
-6. Se connecte à ArgoCD via la CLI (`<IP>:30080`, `--insecure --grpc-web`).
-7. Applique `bootstrap/root-app.yaml` → à partir de là, tout le reste est déployé par ArgoCD.
-8. Affiche `argocd app list` et la version.
+### `apps/root-projects/application.yaml`
 
-> Le nom de release `argocd` et la version `10.1.3` doivent rester **identiques** dans `apps/platform/argocd/application.yaml`, sinon ArgoCD installerait une seconde copie de lui-même au lieu de reprendre la release existante.
+Application **`root-projects`** (sync-wave `-1`) :
+- Synchronise `projects/` (récursif) dans le namespace `argocd`.
+- Appartient au projet **`default`** : elle ne peut pas appartenir à `infra` puisque c'est elle qui crée `infra` (problème de l'œuf et de la poule sur un cluster neuf).
+- `automated` avec `prune` + `selfHeal`, `ServerSideApply`.
+- Annotation `Delete=false` : protège l'Application contre une suppression en cascade.
 
-### `bootstrap/argocd-values.yaml`
+### `manifests/argocd/values.yaml`
 
-Values Helm d'ArgoCD. Utilisées **à deux endroits** : par `install_ArgoCD.sh` au premier install, puis par l'Application `argocd` (via la référence `$values`). Modifier ce fichier et pousser suffit donc à reconfigurer ArgoCD.
+Values Helm **complètes** d'ArgoCD, lues par l'Application `argocd` via la référence `$values`. Modifier ce fichier et pousser suffit à reconfigurer ArgoCD.
 
 | Paramètre | Valeur | Effet |
 |---|---|---|
@@ -152,26 +170,6 @@ Values Helm d'ArgoCD. Utilisées **à deux endroits** : par `install_ArgoCD.sh` 
 | `*.metrics.enabled` | `true` | Expose les métriques de `server`, `controller` et `repoServer` |
 | `*.metrics.serviceMonitor.enabled` | `true` | Crée des `ServiceMonitor` pour que Prometheus scrape ArgoCD |
 | `serviceMonitor.additionalLabels.release` | `prometheus` | Label attendu par le sélecteur de kube-prometheus-stack (release `prometheus`) |
-
-### `bootstrap/root-app.yaml`
-
-**Point d'entrée GitOps.** Appliqué à la main une seule fois (`kubectl apply -f bootstrap/root-app.yaml`), puis maintenu par l'Application `argocd`.
-
-Contient deux Applications :
-
-**`root-projects`** (sync-wave `-1`)
-- Synchronise `projects/` (récursif) dans le namespace `argocd`.
-- Appartient au projet **`default`** : elle ne peut pas appartenir à `infra` puisque c'est elle qui crée `infra` (problème de l'œuf et de la poule sur un cluster neuf).
-- `automated` avec `prune` + `selfHeal`, `ServerSideApply`.
-- Annotation `Delete=false` : protège l'Application contre une suppression en cascade.
-
-**`root-apps`**
-- Synchronise `apps/` (récursif) dans le namespace `argocd`, projet `infra`.
-- **Exclut `platform/prometheus/*`** : Prometheus n'est pas déployé automatiquement.
-- `automated` avec `prune` + `selfHeal`, `ServerSideApply`.
-- Annotation `Delete=false` + finalizer.
-
-> ⚠️ `root-apps` a `prune: true` : **supprimer ou exclure un fichier de `apps/` supprime l'Application correspondante**, et grâce à son finalizer, **toutes les ressources qu'elle a déployées**. C'est voulu, mais à garder en tête.
 
 ### `projects/infra-project.yaml`
 
@@ -191,11 +189,10 @@ AppProject **`infra`**, utilisé par toutes les Applications plateforme. Il déf
 
 ### `apps/platform/argocd/application.yaml`
 
-Application **`argocd`** — ArgoCD qui se gère lui-même (sync-wave `-1`). Utilise **trois sources** :
+Application **`argocd`** — ArgoCD qui se gère lui-même (sync-wave `-1`). Utilise **deux sources** :
 
-1. le chart Helm `argo-cd` 10.1.3, release `argocd`, avec `$values/bootstrap/argocd-values.yaml` ;
-2. ce repo Git, référencé sous le nom `values` (sert uniquement à lire le fichier de values ci-dessus) ;
-3. ce repo Git, dossier `bootstrap/`, **uniquement `root-app.yaml`** → maintient `root-projects` et `root-apps` à jour.
+1. le chart Helm `argo-cd` 10.1.3, release `argocd`, avec `$values/manifests/argocd/values.yaml` ;
+2. ce repo Git (branche `main`), référencé sous le nom `values` (sert uniquement à lire le fichier de values ci-dessus).
 
 Choix de prudence :
 - **Pas de finalizer** : supprimer cette Application ne désinstalle ni ArgoCD ni le reste du cluster.
@@ -232,7 +229,7 @@ Application **`openbao`** (sync-wave `0`) — chart `openbao` **0.30.3** dans `o
 
 Application **`prometheus`** — chart OCI `kube-prometheus-stack` **92.3.1**, release `prometheus`, dans `monitoring`.
 
-- **Exclue de `root-apps`** : n'est **pas** déployée automatiquement (voir [Déployer Prometheus](#déployer--arrêter-prometheus)).
+- **Exclue de `root`** : n'est **pas** déployée automatiquement (voir [Déployer Prometheus](#déployer--arrêter-prometheus)).
 - Prometheus en NodePort **30060**, Grafana en NodePort **30070** (mot de passe admin `admin`).
 - `prometheus-node-exporter.hostRootFsMount.enabled: false` : le montage de la racine de l'hôte ne fonctionne pas sous WSL2.
 - `prune: true`, `selfHeal: false`, `CreateNamespace`, `ServerSideApply`.
@@ -262,16 +259,19 @@ Reliquat d'un exercice du cours (Application `helm-demo` pointant vers le repo `
 
 ## Installation depuis zéro
 
+Seule la branche `bootstrap` est nécessaire :
+
 ```bash
-# 0. Cloner le repo et se placer à la racine
-git clone https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
-cd ArgoCD_Udemy
+# 0. Télécharger uniquement la branche bootstrap
+git clone --branch bootstrap --single-branch \
+  https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git ArgoCD_Udemy-bootstrap
+cd ArgoCD_Udemy-bootstrap
 
 # 1. Kubernetes (désactiver d'abord l'intégration Docker Desktop dans WSL2)
-./bootstrap/install_kub_microk8s.sh
+./install_kub_microk8s.sh
 
 # 2. ArgoCD + bootstrap GitOps
-./bootstrap/install_ArgoCD.sh
+./install_ArgoCD.sh
 
 # 3. Créer les secrets manuels (voir section suivante)
 
@@ -280,11 +280,11 @@ argocd app list
 kubectl -n argocd get applications
 ```
 
-Déroulé côté ArgoCD après le `kubectl apply -f bootstrap/root-app.yaml` :
+Déroulé côté ArgoCD après le `kubectl apply -f root-app.yaml` :
 
-1. `root-projects` crée l'AppProject `infra`.
-2. `root-apps` (projet `infra`) réessaie jusqu'à ce que `infra` existe, puis crée toutes les Applications de `apps/` (sauf Prometheus).
-3. `argocd` reprend la release Helm installée par le script, et prend en charge `root-app.yaml`.
+1. `root` (projet `default`) synchronise `main:apps/`.
+2. `root-projects` (wave `-1`) crée l'AppProject `infra`. Les autres Applications (projet `infra`) réessaient jusqu'à ce qu'il existe.
+3. `argocd` reprend la release Helm installée par le script, avec les values complètes de `manifests/argocd/values.yaml`.
 4. `external-secrets-operator` et `openbao` s'installent.
 5. `eso-config` attend les CRDs ESO, puis crée le `ClusterSecretStore` et l'`ExternalSecret`.
 
@@ -351,10 +351,10 @@ L'annotation `argocd.argoproj.io/sync-wave` ordonne la création des objets **au
 
 | Wave | Objet | Parent | Pourquoi |
 |---|---|---|---|
-| `-1` | `root-projects` | `argocd` (via root-app.yaml) | L'AppProject `infra` doit exister avant les apps qui l'utilisent |
-| `-1` | `argocd` | `root-apps` | ArgoCD avant le reste |
-| `0` | `external-secrets-operator`, `openbao`, `prometheus` | `root-apps` | Composants indépendants |
-| `1` | `eso-config` | `root-apps` | A besoin des CRDs installées par l'opérateur ESO |
+| `-1` | `root-projects` | `root` | L'AppProject `infra` doit exister avant les apps qui l'utilisent |
+| `-1` | `argocd` | `root` | ArgoCD avant le reste |
+| `0` | `external-secrets-operator`, `openbao` | `root` | Composants indépendants |
+| `1` | `eso-config` | `root` | A besoin des CRDs installées par l'opérateur ESO |
 
 ---
 
@@ -364,13 +364,13 @@ L'annotation `argocd.argoproj.io/sync-wave` ordonne la création des objets **au
 
 1. Créer `apps/platform/<composant>/application.yaml` (s'inspirer d'`openbao`) avec `project: infra`.
 2. Si le chart vient d'un **nouveau repo** ou cible un **nouveau namespace**, l'ajouter dans `projects/infra-project.yaml` (`sourceRepos` / `destinations`).
-3. Commit + push. `root-apps` crée l'Application automatiquement.
+3. Commit + push sur `main`. `root` crée l'Application automatiquement — **aucune action sur la branche `bootstrap`**.
 
 ### Ajouter un nouvel AppProject
 
 1. Créer `projects/<nom>-project.yaml` (un `kind: AppProject`, `namespace: argocd`).
 2. Commit + push. `root-projects` le crée automatiquement.
-3. Ne **pas** définir le même AppProject ailleurs (notamment pas dans `root-app.yaml`).
+3. Ne **pas** définir le même AppProject ailleurs.
 
 ### Ajouter des manifests bruts (non-Helm)
 
@@ -379,7 +379,7 @@ L'annotation `argocd.argoproj.io/sync-wave` ordonne la création des objets **au
 
 ### Déployer / arrêter Prometheus
 
-Prometheus est exclu de `root-apps` (`exclude: 'platform/prometheus/*'` dans `root-app.yaml`).
+Prometheus est exclu de `root` (`exclude: 'platform/prometheus/*'` dans `root-app.yaml`, branche `bootstrap`).
 
 ```bash
 # Déployer
@@ -390,11 +390,11 @@ kubectl -n argocd delete application prometheus
 kubectl delete namespace monitoring
 ```
 
-Pour le refaire gérer automatiquement par ArgoCD, retirer la ligne `exclude` de `root-app.yaml` et pousser.
+Pour le refaire gérer automatiquement par ArgoCD, retirer la ligne `exclude` de `root-app.yaml` (branche `bootstrap`), pousser, puis **réappliquer** `kubectl apply -f root-app.yaml` (`root` n'est pas surveillée par ArgoCD).
 
 ### Mettre à jour ArgoCD
 
-Changer `targetRevision` (chart) dans `apps/platform/argocd/application.yaml` — et, pour rester cohérent, la version dans `install_ArgoCD.sh`. Commit + push.
+Changer `targetRevision` (chart) dans `apps/platform/argocd/application.yaml` sur `main`. Commit + push. Pour que les futures installations partent de la même version, mettre aussi à jour `--version` dans `install_ArgoCD.sh` sur la branche `bootstrap`.
 
 ### Forcer un rafraîchissement
 
@@ -431,7 +431,7 @@ syncPolicy:
 
 Si deux Applications (ou une Application + un `helm install` manuel) gèrent le même objet, elles le réécrivent chacune leur tour. Deux cas rencontrés :
 
-- **AppProject `infra` défini à la fois dans `root-app.yaml` et dans `projects/`** → l'app `argocd` passait en OutOfSync en boucle. Il n'est désormais défini que dans `projects/`.
+- **AppProject `infra` défini à la fois dans l'ancien `root-app.yaml` et dans `projects/`** → l'app `argocd` passait en OutOfSync en boucle. Il n'est désormais défini que dans `projects/`.
 - **ESO installé deux fois** (un `helm install external-secrets` manuel + l'Application ArgoCD) → les deux cert-controllers réécrivaient les mêmes webhooks avec des services et des CA différents. L'install manuelle a été retirée.
 
 Pour diagnostiquer : `argocd app diff <app>` et
@@ -442,7 +442,7 @@ Pour diagnostiquer : `argocd app diff <app>` et
 ### Finalizers et suppressions en cascade
 
 - `resources-finalizer.argocd.argoproj.io` sur une Application : la supprimer supprime **toutes les ressources** qu'elle a créées.
-- `root-apps` a `prune: true` : retirer un fichier de `apps/` supprime l'Application, donc (finalizer) tout ce qu'elle déploie.
+- `root` a `prune: true` : retirer un fichier de `apps/` supprime l'Application, donc (finalizer) tout ce qu'elle déploie.
 - Pour supprimer une Application **sans** toucher à ses ressources, retirer d'abord son finalizer :
 
   ```bash
@@ -451,12 +451,12 @@ Pour diagnostiquer : `argocd app diff <app>` et
   kubectl -n argocd delete app <app>
   ```
 
-- L'annotation `argocd.argoproj.io/sync-options: Delete=false` protège un objet contre ces suppressions (utilisée sur `root-projects`, `root-apps` et l'AppProject `infra`).
+- L'annotation `argocd.argoproj.io/sync-options: Delete=false` protège un objet contre ces suppressions (utilisée sur `root-projects` et l'AppProject `infra`).
 
 ### `ServiceMonitor` sans Prometheus
 
-`argocd-values.yaml` active des `ServiceMonitor`, mais leur CRD n'existe que si kube-prometheus-stack est installé. D'où :
-- `--set ...serviceMonitor.enabled=false` dans `install_ArgoCD.sh` (le `helm install` échouerait sinon) ;
+`manifests/argocd/values.yaml` active des `ServiceMonitor`, mais leur CRD n'existe que si kube-prometheus-stack est installé. D'où :
+- des values **minimales sans `ServiceMonitor`** pour le `helm install` de la branche `bootstrap` (il échouerait sinon) ;
 - `SkipDryRunOnMissingResource=true` dans l'Application `argocd`.
 
 Les CRDs de Prometheus sont conservées lorsqu'on supprime la stack, ce qui garde les `ServiceMonitor` valides.
@@ -472,7 +472,7 @@ Ce repo est un **lab local**. Plusieurs choix sont inacceptables en production :
 | OpenBao en mode dev (stockage en mémoire, token root `root` en clair) | `apps/platform/openbao/application.yaml` | Mode HA avec stockage persistant, unseal, auth Kubernetes |
 | ESO s'authentifie avec le token root | `workloads/eso-config/eso.yaml` + secret `vault-token` | Auth Kubernetes OpenBao + policy en lecture seule |
 | Mot de passe Grafana `admin` en clair dans Git | `apps/platform/prometheus/application.yaml` | Secret externe (ESO) via `grafana.admin.existingSecret` |
-| ArgoCD en HTTP (`server.insecure: true`) | `bootstrap/argocd-values.yaml` | TLS via Ingress |
+| ArgoCD en HTTP (`server.insecure: true`) | `manifests/argocd/values.yaml` + `argocd-values.yaml` (branche `bootstrap`) | TLS via Ingress |
 | Services en NodePort | plusieurs | Ingress + authentification |
 | `clusterResourceWhitelist: */*` | `projects/infra-project.yaml` | Liste restreinte des kinds nécessaires |
 
