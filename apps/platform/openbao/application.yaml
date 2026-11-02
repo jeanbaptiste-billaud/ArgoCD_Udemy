@@ -12,6 +12,7 @@ spec:
   sources:
     - repoURL: https://openbao.github.io/openbao-helm
       chart: openbao
+      targetRevision: 0.30.3          # obligatoire pour une source chart Helm
       helm:
         valueFiles:
           - $values/manifests/openbao/values.yaml

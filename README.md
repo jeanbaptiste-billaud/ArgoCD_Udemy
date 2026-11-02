@@ -17,7 +17,7 @@ Composants déployés :
 |---|---|---|
 | **ArgoCD** | Moteur GitOps, se gère lui-même depuis ce repo | `argocd` |
 | **External Secrets Operator (ESO)** | Synchronise des secrets externes vers des `Secret` Kubernetes | `external-secrets` |
-| **OpenBao** | Coffre-fort de secrets (fork open source de Vault), en mode dev | `openbao` |
+| **OpenBao** | Coffre-fort de secrets (fork open source de Vault), en mode standalone (stockage persistant) | `openbao` |
 | **kube-prometheus-stack** | Prometheus, Grafana, Alertmanager — **déploiement manuel** (voir plus bas) | `monitoring` |
 
 ---
@@ -108,7 +108,7 @@ ArgoCD_Udemy/
 │       │   └── config/
 │       │       └── application.yaml   # pointe vers workloads/eso-config
 │       ├── openbao/
-│       │   └── application.yaml       # OpenBao (chart Helm, mode dev)
+│       │   └── application.yaml       # OpenBao (chart Helm, mode standalone)
 │       └── prometheus/
 │           └── application.yaml       # kube-prometheus-stack — EXCLU de root
 ├── manifests/                         # values Helm référencées par des Applications ($values)
@@ -220,9 +220,13 @@ Application **`eso-config`** (sync-wave `1`, donc **après** l'opérateur) — d
 
 Application **`openbao`** (sync-wave `0`) — chart `openbao` **0.30.3** dans `openbao`.
 
-- **Mode dev** (`server.dev.enabled: true`, token root `root`) : un seul pod, stockage **en mémoire**, déjà déverrouillé (unsealed), moteur KV v2 monté sur `secret/`.
+Deux sources : le chart, et ce repo (`ref: values`) pour lire `manifests/openbao/values.yaml`.
+
+- **Mode standalone** : un seul pod, stockage `file` persistant sur un PVC (`microk8s-hostpath`, monté sur `/openbao/data`), HTTP sans TLS, UI activée.
+- Au premier démarrage, OpenBao est **non initialisé et scellé (sealed)**. Il faut l'initialiser une fois, puis le **déverrouiller (unseal) après chaque redémarrage du pod**. Voir [Prérequis manuels](#prérequis-manuels-secrets).
+- Tant qu'il est scellé, le pod reste `0/1` et l'Application n'est pas *Healthy* : c'est normal.
+- Agent injector désactivé (`injector.enabled: false`), donc pas de webhook ni de `ignoreDifferences`.
 - Service exposé en **NodePort 30200**.
-- **`ignoreDifferences` sur le `caBundle`** du `MutatingWebhookConfiguration` `openbao-agent-injector-cfg` + `RespectIgnoreDifferences=true` : l'agent injector génère son certificat et l'injecte lui-même.
 - `selfHeal: false`.
 
 ### `apps/platform/prometheus/application.yaml`
@@ -294,23 +298,45 @@ Déroulé côté ArgoCD après le `kubectl apply -f root-app.yaml` :
 
 Ces éléments sont **volontairement hors de Git** (ce sont des secrets) et doivent être créés à la main.
 
-### 1. Token d'accès d'ESO à OpenBao
+### 1. Initialiser OpenBao (une seule fois)
+
+```bash
+kubectl -n openbao exec openbao-0 -- \
+  bao operator init -key-shares=1 -key-threshold=1
+```
+
+La commande affiche une **Unseal Key** et un **Initial Root Token**. ⚠️ **Ils ne sont affichés qu'une fois** : les conserver hors de Git (gestionnaire de mots de passe). Sans la clé d'unseal, les données sont irrécupérables.
+
+### 2. Déverrouiller OpenBao (après chaque redémarrage du pod)
+
+```bash
+kubectl -n openbao exec openbao-0 -- bao operator unseal <unseal-key>
+```
+
+### 3. Activer le moteur KV v2 (une seule fois)
+
+Contrairement au mode dev, rien n'est monté par défaut :
+
+```bash
+kubectl -n openbao exec openbao-0 -- sh -c \
+  'BAO_TOKEN=<root-token> bao secrets enable -path=secret kv-v2'
+```
+
+### 4. Token d'accès d'ESO à OpenBao
 
 ```bash
 kubectl -n external-secrets create secret generic vault-token \
-  --from-literal=token=root
+  --from-literal=token=<root-token>
 ```
 
-(`root` est le token root du mode dev, défini dans `apps/platform/openbao/application.yaml`.)
-
-### 2. Secret de démo dans OpenBao
+### 5. Secret de démo dans OpenBao
 
 ```bash
-kubectl -n openbao exec -it openbao-0 -- \
-  bao kv put secret/production/db password=<mot-de-passe>
+kubectl -n openbao exec openbao-0 -- sh -c \
+  'BAO_TOKEN=<root-token> bao kv put secret/production/db password=<mot-de-passe>'
 ```
 
-> ⚠️ En mode dev, OpenBao stocke tout **en mémoire** : **le secret est perdu à chaque redémarrage du pod**. Il faut alors le recréer ; l'`ExternalSecret` repasse en `SecretSynced` à son prochain rafraîchissement (1 min).
+Les données sont persistées sur le PVC : elles survivent aux redémarrages (il suffit de refaire l'unseal).
 
 Vérification :
 
@@ -333,7 +359,7 @@ kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP
 | Interface | URL | Identifiants |
 |---|---|---|
 | ArgoCD | `http://<IP>:30080` | `admin` / `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' \| base64 -d` |
-| OpenBao | `http://<IP>:30200` | token `root` |
+| OpenBao | `http://<IP>:30200` | root token obtenu au `bao operator init` |
 | Prometheus | `http://<IP>:30060` | — (si déployé) |
 | Grafana | `http://<IP>:30070` | `admin` / `admin` (si déployé) |
 
@@ -414,7 +440,7 @@ Les opérateurs exposant un **webhook d'admission** (ESO, l'agent injector d'Ope
 
 Le chart Helm livre ce champ vide (il ne peut pas connaître la CA à l'avance). Sans configuration, ArgoCD voit donc un écart permanent, et avec `selfHeal` il vide le champ, l'opérateur le remet, etc. — l'app oscille entre Synced et OutOfSync et le webhook est cassé par intermittence.
 
-Solution appliquée dans `external-secrets-operator` et `openbao` :
+Solution appliquée dans `external-secrets-operator` (et dans `openbao` tant que son agent injector était activé) :
 
 ```yaml
 ignoreDifferences:
@@ -469,7 +495,7 @@ Ce repo est un **lab local**. Plusieurs choix sont inacceptables en production :
 
 | Point | Où | En production |
 |---|---|---|
-| OpenBao en mode dev (stockage en mémoire, token root `root` en clair) | `apps/platform/openbao/application.yaml` | Mode HA avec stockage persistant, unseal, auth Kubernetes |
+| OpenBao mono-instance, HTTP sans TLS, 1 seule clé d'unseal, unseal manuel | `manifests/openbao/values.yaml` | Mode HA (Raft), TLS, plusieurs clés (Shamir) ou auto-unseal |
 | ESO s'authentifie avec le token root | `workloads/eso-config/eso.yaml` + secret `vault-token` | Auth Kubernetes OpenBao + policy en lecture seule |
 | Mot de passe Grafana `admin` en clair dans Git | `apps/platform/prometheus/application.yaml` | Secret externe (ESO) via `grafana.admin.existingSecret` |
 | ArgoCD en HTTP (`server.insecure: true`) | `manifests/argocd/values.yaml` + `argocd-values.yaml` (branche `bootstrap`) | TLS via Ingress |
