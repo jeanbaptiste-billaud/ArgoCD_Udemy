@@ -157,7 +157,8 @@ ArgoCD_Udemy/
 │       ├── nodeport.yaml              # Service NodePort 30500
 │       └── s3/
 │           ├── s3-credentials.yaml    # ExternalSecret : amorçage des clés S3 (une seule fois)
-│           └── s3-pushsecret.yaml     # PushSecret : Secret Kubernetes -> OpenBao
+│           ├── s3-pushsecret.yaml     # PushSecret : Secret Kubernetes -> OpenBao
+│           └── s3-temp-pushsecret.yaml # PushSecret : clé temporaire -> OpenBao (tempAccessKey)
 └── roar-k8s-helm.yaml                 # exercice du cours, NON géré par le GitOps
 ```
 
@@ -356,6 +357,7 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/mlflow/values.
 1. **`s3/s3-credentials.yaml`** — `ExternalSecret` `mlflow-s3-credentials`, `refreshPolicy: CreatedOnce` : crée **une seule fois** le Secret `mlflow-s3-credentials` (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) depuis OpenBao `secret/seaweedfs/s3`, puis ne le modifie plus. `creationPolicy: Orphan` : le Secret survit à la suppression de l'`ExternalSecret`.
 2. **`s3/s3-pushsecret.yaml`** — `PushSecret` `mlflow-s3-credentials-push` : toutes les 5 min, renvoie ce Secret vers `secret/seaweedfs/s3` (`accessKey` / `secretKey`), les **mêmes** emplacements qu'à l'étape 1. `deletionPolicy: None` : supprimer le PushSecret ne supprime rien dans OpenBao.
 3. SeaweedFS lit `secret/seaweedfs/s3` pour son identité `mlflow` (`workloads/seaweedfs/s3-credentials.yaml`).
+4. **`s3/s3-temp-pushsecret.yaml`** — `PushSecret` `mlflow-s3-temp-push` : renvoie la clé `AWS_TEMP_ACCESS_KEY` du Secret `mlflow-s3-temp` vers `secret/seaweedfs/s3`, propriété **`tempAccessKey`**, à côté des clés actives sans les écraser. Le Secret `mlflow-s3-temp` sera alimenté par la rotation (CronJob à venir) : d'ici là, ce PushSecret est en erreur (Secret source absent), c'est normal.
 
 Modifier le Secret `mlflow-s3-credentials` se propage donc à OpenBao (≤ 5 min), puis à SeaweedFS (rafraîchissement ≤ 1 h **et** redémarrage du pod SeaweedFS, qui ne lit sa config qu'au démarrage). Ne pas modifier `secret/seaweedfs/s3` directement dans OpenBao : le PushSecret le réécrirait avec la valeur du Secret.
 
