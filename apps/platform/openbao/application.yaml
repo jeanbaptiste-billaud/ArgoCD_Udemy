@@ -9,33 +9,21 @@ metadata:
     argocd.argoproj.io/sync-wave: "0"
 spec:
   project: infra
-  source:
-    repoURL: https://openbao.github.io/openbao-helm
-    chart: openbao
-    targetRevision: 0.30.3
-    helm:
-      valuesObject:
-        server:
-          dev:
-            enabled: true
-            devRootToken: "root"
-          service:
-            type: NodePort
-            nodePort: 30200
+  sources:
+    - repoURL: https://openbao.github.io/openbao-helm
+      chart: openbao
+      helm:
+        valueFiles:
+          - $values/manifests/openbao/values.yaml
+    - repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git   # le repo qui contient manifests/openbao/values.yaml
+      targetRevision: main
+      ref: values
   destination:
     server: https://kubernetes.default.svc
     namespace: openbao
-  # L'agent injector (vault-k8s) genere son certificat et injecte lui-meme
-  # le caBundle dans son webhook : ArgoCD ne doit pas le comparer a Git.
-  ignoreDifferences:
-    - group: admissionregistration.k8s.io
-      kind: MutatingWebhookConfiguration
-      jqPathExpressions:
-        - .webhooks[]?.clientConfig.caBundle
   syncPolicy:
     automated:
       prune: true
       selfHeal: false
     syncOptions:
       - CreateNamespace=true
-      - RespectIgnoreDifferences=true   # ne pas ecraser le caBundle au sync
