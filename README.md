@@ -154,8 +154,10 @@ ArgoCD_Udemy/
 │   │           └── create-db-job.yaml # Job : rôle et base "mlflow"
 │   └── mlflow/
 │       ├── postgres-credentials.yaml  # ExternalSecret : accès à la base mlflow
-│       ├── s3-credentials.yaml        # ExternalSecret : accès S3 à SeaweedFS
-│       └── nodeport.yaml              # Service NodePort 30500
+│       ├── nodeport.yaml              # Service NodePort 30500
+│       └── s3/
+│           ├── s3-credentials.yaml    # ExternalSecret : amorçage des clés S3 (une seule fois)
+│           └── s3-pushsecret.yaml     # PushSecret : Secret Kubernetes -> OpenBao
 └── roar-k8s-helm.yaml                 # exercice du cours, NON géré par le GitOps
 ```
 
@@ -335,7 +337,7 @@ L'application cliente lit les **mêmes** identifiants OpenBao via son propre `Ex
 
 Application **`mlflow`** (sync-wave `3`) — chart `mlflow` **1.11.7** de community-charts (MLflow **3.16.0**) dans `mlflow`.
 
-Trois sources : le chart, ce repo (`ref: values`) pour `manifests/mlflow/values.yaml`, et ce repo (`path: workloads/mlflow`).
+Trois sources : le chart, ce repo (`ref: values`) pour `manifests/mlflow/values.yaml`, et ce repo (`path: workloads/mlflow`, récursif pour inclure `s3/`).
 
 - Image `burakince/mlflow` : contrairement à l'image officielle, elle embarque `psycopg2` (PostgreSQL) et `boto3` (S3).
 - **Métadonnées** dans la base `mlflow` du PostgreSQL partagé (`backendStore.postgres` + `existingDatabaseSecret`). Deux init containers : l'un attend que Postgres réponde, l'autre crée/migre le schéma.
@@ -346,8 +348,18 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/mlflow/values.
 
 `workloads/mlflow/` contient :
 - **`postgres-credentials.yaml`** — `ExternalSecret` `mlflow-postgres-credentials` : `username` / `password` lus dans OpenBao `secret/mlflow/postgres` (les mêmes que ceux du Job `db-mlflow`) ;
-- **`s3-credentials.yaml`** — `ExternalSecret` `mlflow-s3-credentials` : `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, lus dans le **même** secret OpenBao que SeaweedFS (`secret/seaweedfs/s3`) ;
-- **`nodeport.yaml`** — `Service` `mlflow-nodeport` (NodePort 30500).
+- **`nodeport.yaml`** — `Service` `mlflow-nodeport` (NodePort 30500) ;
+- **`s3/`** — clés S3 de l'identité `mlflow` de SeaweedFS (voir ci-dessous).
+
+**Clés S3 de MLflow : le Secret Kubernetes fait foi.** Elles sont destinées à être renouvelées depuis le cluster (rotation à venir), d'où ce circuit :
+
+1. **`s3/s3-credentials.yaml`** — `ExternalSecret` `mlflow-s3-credentials`, `refreshPolicy: CreatedOnce` : crée **une seule fois** le Secret `mlflow-s3-credentials` (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) depuis OpenBao `secret/seaweedfs/s3`, puis ne le modifie plus. `creationPolicy: Orphan` : le Secret survit à la suppression de l'`ExternalSecret`.
+2. **`s3/s3-pushsecret.yaml`** — `PushSecret` `mlflow-s3-credentials-push` : toutes les 5 min, renvoie ce Secret vers `secret/seaweedfs/s3` (`accessKey` / `secretKey`), les **mêmes** emplacements qu'à l'étape 1. `deletionPolicy: None` : supprimer le PushSecret ne supprime rien dans OpenBao.
+3. SeaweedFS lit `secret/seaweedfs/s3` pour son identité `mlflow` (`workloads/seaweedfs/s3-credentials.yaml`).
+
+Modifier le Secret `mlflow-s3-credentials` se propage donc à OpenBao (≤ 5 min), puis à SeaweedFS (rafraîchissement ≤ 1 h **et** redémarrage du pod SeaweedFS, qui ne lit sa config qu'au démarrage). Ne pas modifier `secret/seaweedfs/s3` directement dans OpenBao : le PushSecret le réécrirait avec la valeur du Secret.
+
+> ESO refuse d'écrire dans un secret OpenBao qu'il n'a pas créé (`secret not managed by external-secrets`). `secret/seaweedfs/s3` étant créé à la main, il faut lui ajouter la métadonnée `managed-by=external-secrets` (voir [Prérequis manuels](#prérequis-manuels-secrets)).
 
 > Le chart crée un Secret `mlflow-flask-server-secret-key` aléatoire en hook `pre-install` (→ PreSync sous ArgoCD, recréé à chaque sync puisque `lookup` ne fonctionne pas). Sans authentification MLflow, cette clé n'a pas d'effet utile ; elle ne provoque pas d'OutOfSync.
 
@@ -456,7 +468,14 @@ kubectl -n openbao exec openbao-0 -- sh -c \
   'BAO_TOKEN=<root-token> bao kv put secret/seaweedfs/s3 accessKey=<access-key> secretKey=<secret-key>'
 ```
 
-ESO crée alors le Secret `seaweedfs-s3-config` et le pod SeaweedFS démarre. Les clés `mlflow` sont aussi utilisées par MLflow (Secret `mlflow-s3-credentials`). Pour une rotation, modifier le secret dans OpenBao puis redémarrer le pod (`kubectl -n seaweedfs rollout restart deploy/seaweedfs-all-in-one`) : la config S3 n'est lue qu'au démarrage.
+Autoriser le `PushSecret` de MLflow à réécrire `secret/seaweedfs/s3` (ESO n'écrit que dans les secrets marqués comme gérés par lui) :
+
+```bash
+kubectl -n openbao exec openbao-0 -- sh -c \
+  'BAO_TOKEN=<root-token> bao kv metadata put -custom-metadata=managed-by=external-secrets secret/seaweedfs/s3'
+```
+
+ESO crée alors le Secret `seaweedfs-s3-config` et le pod SeaweedFS démarre. Les clés `mlflow` sont aussi utilisées par MLflow : après l'amorçage, c'est le Secret Kubernetes `mlflow-s3-credentials` qui fait foi (voir [MLflow](#appsplatformmlflowapplicationyaml)). La config S3 de SeaweedFS n'est lue qu'au démarrage : après un changement de clés, `kubectl -n seaweedfs rollout restart deploy/seaweedfs-all-in-one`.
 
 ### 6. Superutilisateur PostgreSQL
 
