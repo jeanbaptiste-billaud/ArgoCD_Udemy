@@ -22,7 +22,7 @@ spec:
       ref: values                     # lecture de manifests/seaweedfs/values.yaml
     - repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
       targetRevision: main
-      path: workloads/seaweedfs       # ExternalSecret des identifiants S3
+      path: workloads/seaweedfs       # ExternalSecret S3 + Service NodePort S3
   destination:
     server: https://kubernetes.default.svc
     namespace: seaweedfs

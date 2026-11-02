@@ -142,7 +142,8 @@ ArgoCD_Udemy/
 │   ├── eso-config/
 │   │   └── cluster-secret-store.yaml  # ClusterSecretStore OpenBao
 │   ├── seaweedfs/
-│   │   └── s3-credentials.yaml        # ExternalSecret : config S3 de SeaweedFS depuis OpenBao
+│   │   ├── s3-credentials.yaml        # ExternalSecret : config S3 de SeaweedFS depuis OpenBao
+│   │   └── s3-nodeport.yaml           # Service NodePort 30333 (S3 uniquement)
 │   ├── postgres/
 │   │   ├── admin-credentials.yaml     # ExternalSecret du superutilisateur
 │   │   ├── service.yaml               # Service postgres.postgres.svc:5432
@@ -271,11 +272,12 @@ Deux sources : le chart, et ce repo (`ref: values`) pour lire `manifests/openbao
 
 Application **`seaweedfs`** (sync-wave `2`) — chart officiel `seaweedfs` **4.51.0** (la 4.52.0 référence une image `4.52` non publiée sur Docker Hub) dans `seaweedfs`, stockage S3 des artefacts MLflow.
 
-Trois sources : le chart, ce repo (`ref: values`) pour `manifests/seaweedfs/values.yaml`, et ce repo (`path: workloads/seaweedfs`) pour l'`ExternalSecret` des identifiants S3.
+Trois sources : le chart, ce repo (`ref: values`) pour `manifests/seaweedfs/values.yaml`, et ce repo (`path: workloads/seaweedfs`) pour l'`ExternalSecret` des identifiants S3 et le Service NodePort S3.
 
 - **Mode all-in-one** (`manifests/seaweedfs/values.yaml`) : un seul pod `weed server` (master + volume + filer + passerelle S3). `master`, `volume` et `filer` séparés sont désactivés.
 - Données persistées sur un PVC `seaweedfs-all-in-one-data` (10 Gi, `microk8s-hostpath`).
-- S3 sur le port **8333**, exposé en **NodePort 30333**. Authentification activée.
+- S3 sur le port **8333**, authentification activée. Le Service du chart (`seaweedfs-all-in-one.seaweedfs.svc`) est en **ClusterIP** : en NodePort, Kubernetes attribuerait un NodePort aléatoire à **chaque** port (master, volume, filer…), et le filer (8888) permet de lire et supprimer les fichiers **sans authentification**. Seul S3 est exposé, en **NodePort 30333**, par `workloads/seaweedfs/s3-nodeport.yaml`.
+- Interfaces web (master 9333, filer 8888) : accès ponctuel par `kubectl -n seaweedfs port-forward svc/seaweedfs-all-in-one 9333 8888`.
 - Bucket **`mlflow`** créé par le Job `seaweedfs-bucket-hook` (hook Helm `post-install`, exécuté par ArgoCD en **PostSync**, idempotent).
 - Wave `2` + `SkipDryRunOnMissingResource` + `retry` : a besoin des CRDs ESO et du `ClusterSecretStore` `openbao-backend`.
 - Tant que le Secret `seaweedfs-s3-config` n'existe pas (OpenBao scellé ou secret absent), le pod reste en `ContainerCreating` : c'est normal.
@@ -285,6 +287,10 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/seaweedfs/valu
 `ExternalSecret` `seaweedfs-s3-config` (namespace `seaweedfs`) : lit `accessKey` / `secretKey` dans le secret OpenBao `seaweedfs/s3` et génère (via un `template` ESO) la clé `seaweedfs_s3_config`, au format JSON d'identités attendu par `weed s3 -config`. Une seule identité `mlflow` avec les droits `Admin`, `Read`, `Write`, `List`, `Tagging`.
 
 > Pourquoi pas les identifiants générés par le chart ? Son Secret S3 utilise `lookup` + `randAlphaNum` pour conserver des clés aléatoires entre deux `helm upgrade`. **ArgoCD ne supporte pas `lookup`** (il fait un `helm template`) : les clés seraient régénérées à chaque sync. D'où `existingConfigSecret`.
+
+### `workloads/seaweedfs/s3-nodeport.yaml`
+
+`Service` `seaweedfs-s3-nodeport` : expose uniquement le port S3 (8333) du pod all-in-one en **NodePort 30333**.
 
 ### `apps/platform/postgres/application.yaml`
 

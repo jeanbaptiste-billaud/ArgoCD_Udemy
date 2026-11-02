@@ -31,7 +31,8 @@ allInOne:
     createBuckets:
       - name: mlflow
 
+  # ClusterIP : en NodePort, chaque port du Service (master, filer, volume...)
+  # recevrait un NodePort aleatoire, et le filer n'a pas d'authentification.
+  # L'acces externe S3 passe par workloads/seaweedfs/s3-nodeport.yaml.
   service:
-    type: NodePort
-    nodePorts:
-      s3: 30333
+    type: ClusterIP
