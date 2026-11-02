@@ -222,7 +222,7 @@ Application **`openbao`** (sync-wave `0`) — chart `openbao` **0.30.3** dans `o
 
 Deux sources : le chart, et ce repo (`ref: values`) pour lire `manifests/openbao/values.yaml`.
 
-- **Mode standalone** : un seul pod, stockage `file` persistant sur un PVC (`microk8s-hostpath`, monté sur `/openbao/data`), HTTP sans TLS, UI activée.
+- **Mode standalone** : un seul pod, stockage intégré **Raft** (mono-nœud) persistant sur un PVC (`microk8s-hostpath`, monté sur `/openbao/data`), HTTP sans TLS, UI activée.
 - Au premier démarrage, OpenBao est **non initialisé et scellé (sealed)**. Il faut l'initialiser une fois, puis le **déverrouiller (unseal) après chaque redémarrage du pod**. Voir [Prérequis manuels](#prérequis-manuels-secrets).
 - Tant qu'il est scellé, le pod reste `0/1` et l'Application n'est pas *Healthy* : c'est normal.
 - Agent injector désactivé (`injector.enabled: false`), donc pas de webhook ni de `ignoreDifferences`.

@@ -38,8 +38,12 @@ server:
         cluster_address = "[::]:8201"
       }
 
-      storage "file" {
-        path = "/openbao/data"
+      # Raft (stockage integre) mono-noeud : le backend "file" n'existe
+      # plus dans OpenBao 2.x ("unknown storage type file").
+      # HOSTNAME est remplace par le nom du pod au demarrage.
+      storage "raft" {
+        path    = "/openbao/data"
+        node_id = "HOSTNAME"
       }
 
 ui:
