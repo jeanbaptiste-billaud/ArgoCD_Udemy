@@ -18,6 +18,7 @@ Composants déployés :
 | **ArgoCD** | Moteur GitOps, se gère lui-même depuis ce repo | `argocd` |
 | **External Secrets Operator (ESO)** | Synchronise des secrets externes vers des `Secret` Kubernetes | `external-secrets` |
 | **OpenBao** | Coffre-fort de secrets (fork open source de Vault), en mode standalone (stockage persistant) | `openbao` |
+| **SeaweedFS** | Stockage objet compatible S3 (mode all-in-one), stockage d'artefacts pour MLflow | `seaweedfs` |
 | **kube-prometheus-stack** | Prometheus, Grafana, Alertmanager — **déploiement manuel** (voir plus bas) | `monitoring` |
 
 ---
@@ -55,15 +56,18 @@ flowchart TD
     ROOT --> ESO[Application<br/>external-secrets-operator]
     ROOT --> ESOC[Application<br/>eso-config]
     ROOT --> BAO[Application<br/>openbao]
+    ROOT --> SWFS[Application<br/>seaweedfs]
     ROOT -. exclu .-> PROM[Application<br/>prometheus]
 
     ARGO -->|chart argo-cd + values| ARGOCD[(ArgoCD)]
     ESO -->|chart external-secrets| ESOD[(ESO)]
     ESOC -->|workloads/eso-config| CSS[(ClusterSecretStore<br/>+ ExternalSecret)]
     BAO -->|chart openbao| BAOD[(OpenBao)]
+    SWFS -->|chart seaweedfs + workloads/seaweedfs| SWFSD[(SeaweedFS S3)]
     PROM -.->|chart kube-prometheus-stack| PROMD[(Monitoring)]
 
     CSS -->|lit les secrets| BAOD
+    SWFSD -.->|identifiants S3 via ESO| CSS
 ```
 
 Points clés :
@@ -109,16 +113,22 @@ ArgoCD_Udemy/
 │       │       └── application.yaml   # pointe vers workloads/eso-config
 │       ├── openbao/
 │       │   └── application.yaml       # OpenBao (chart Helm, mode standalone)
+│       ├── seaweedfs/
+│       │   └── application.yaml       # SeaweedFS S3 (chart Helm all-in-one + ExternalSecret)
 │       └── prometheus/
 │           └── application.yaml       # kube-prometheus-stack — EXCLU de root
 ├── manifests/                         # values Helm référencées par des Applications ($values)
 │   ├── argocd/
 │   │   └── values.yaml                # values complètes d'ArgoCD
-│   └── openbao/
+│   ├── openbao/
+│   │   └── values.yaml
+│   └── seaweedfs/
 │       └── values.yaml
 ├── workloads/                         # manifests "bruts" référencés par des Applications
-│   └── eso-config/
-│       └── eso.yaml                   # ClusterSecretStore OpenBao + ExternalSecret de démo
+│   ├── eso-config/
+│   │   └── eso.yaml                   # ClusterSecretStore OpenBao + ExternalSecret de démo
+│   └── seaweedfs/
+│       └── s3-config.yaml             # ExternalSecret : config S3 de SeaweedFS depuis OpenBao
 └── roar-k8s-helm.yaml                 # exercice du cours, NON géré par le GitOps
 ```
 
@@ -180,8 +190,9 @@ AppProject **`infra`**, utilisé par toutes les Applications plateforme. Il déf
   - `https://argoproj.github.io/argo-helm` (chart ArgoCD) ;
   - `https://charts.external-secrets.io` (chart ESO) ;
   - `https://openbao.github.io/openbao-helm` (chart OpenBao) ;
+  - `https://seaweedfs.github.io/seaweedfs/helm` (chart SeaweedFS) ;
   - `ghcr.io/prometheus-community/charts` (chart OCI kube-prometheus-stack).
-- **`destinations`** — où elles peuvent déployer : `argocd`, `external-secrets`, `openbao`, `monitoring`, `production`, `kube-system` (certains charts y posent des composants, ex. Services de kubelet pour Prometheus).
+- **`destinations`** — où elles peuvent déployer : `argocd`, `external-secrets`, `openbao`, `seaweedfs`, `monitoring`, `production`, `kube-system` (certains charts y posent des composants, ex. Services de kubelet pour Prometheus).
 - **`clusterResourceWhitelist: */*`** — autorise les ressources cluster-scoped (CRDs, ClusterRoles, webhooks…), nécessaires aux opérateurs.
 - Annotation `Delete=false` : l'AppProject n'est jamais supprimé en cascade, même si `root-projects` l'est.
 
@@ -228,6 +239,25 @@ Deux sources : le chart, et ce repo (`ref: values`) pour lire `manifests/openbao
 - Agent injector désactivé (`injector.enabled: false`), donc pas de webhook ni de `ignoreDifferences`.
 - Service exposé en **NodePort 30200**.
 - `selfHeal: false`.
+
+### `apps/platform/seaweedfs/application.yaml`
+
+Application **`seaweedfs`** (sync-wave `2`) — chart officiel `seaweedfs` **4.52.0** dans `seaweedfs`, stockage S3 des artefacts MLflow.
+
+Trois sources : le chart, ce repo (`ref: values`) pour `manifests/seaweedfs/values.yaml`, et ce repo (`path: workloads/seaweedfs`) pour l'`ExternalSecret` des identifiants S3.
+
+- **Mode all-in-one** (`manifests/seaweedfs/values.yaml`) : un seul pod `weed server` (master + volume + filer + passerelle S3). `master`, `volume` et `filer` séparés sont désactivés.
+- Données persistées sur un PVC `seaweedfs-all-in-one-data` (10 Gi, `microk8s-hostpath`).
+- S3 sur le port **8333**, exposé en **NodePort 30333**. Authentification activée.
+- Bucket **`mlflow`** créé par le Job `seaweedfs-bucket-hook` (hook Helm `post-install`, exécuté par ArgoCD en **PostSync**, idempotent).
+- Wave `2` + `SkipDryRunOnMissingResource` + `retry` : a besoin des CRDs ESO et du `ClusterSecretStore` `openbao-backend`.
+- Tant que le Secret `seaweedfs-s3-config` n'existe pas (OpenBao scellé ou secret absent), le pod reste en `ContainerCreating` : c'est normal.
+
+### `workloads/seaweedfs/s3-config.yaml`
+
+`ExternalSecret` `seaweedfs-s3-config` (namespace `seaweedfs`) : lit `accessKey` / `secretKey` dans le secret OpenBao `seaweedfs/s3` et génère (via un `template` ESO) la clé `seaweedfs_s3_config`, au format JSON d'identités attendu par `weed s3 -config`. Une seule identité `mlflow` avec les droits `Admin`, `Read`, `Write`, `List`, `Tagging`.
+
+> Pourquoi pas les identifiants générés par le chart ? Son Secret S3 utilise `lookup` + `randAlphaNum` pour conserver des clés aléatoires entre deux `helm upgrade`. **ArgoCD ne supporte pas `lookup`** (il fait un `helm template`) : les clés seraient régénérées à chaque sync. D'où `existingConfigSecret`.
 
 ### `apps/platform/prometheus/application.yaml`
 
@@ -336,6 +366,15 @@ kubectl -n openbao exec openbao-0 -- sh -c \
   'BAO_TOKEN=<root-token> bao kv put secret/production/db password=<mot-de-passe>'
 ```
 
+### 6. Identifiants S3 de SeaweedFS
+
+```bash
+kubectl -n openbao exec openbao-0 -- sh -c \
+  'BAO_TOKEN=<root-token> bao kv put secret/seaweedfs/s3 accessKey=<access-key> secretKey=<secret-key>'
+```
+
+ESO crée alors le Secret `seaweedfs-s3-config` et le pod SeaweedFS démarre. Pour une rotation, modifier le secret dans OpenBao puis redémarrer le pod (`kubectl -n seaweedfs rollout restart deploy/seaweedfs-all-in-one`) : la config S3 n'est lue qu'au démarrage.
+
 Les données sont persistées sur le PVC : elles survivent aux redémarrages (il suffit de refaire l'unseal).
 
 Vérification :
@@ -344,6 +383,8 @@ Vérification :
 kubectl get clustersecretstore openbao-backend      # STATUS = Valid
 kubectl -n production get externalsecret            # STATUS = SecretSynced
 kubectl -n production get secret db-credentials -o jsonpath='{.data.password}' | base64 -d
+kubectl -n seaweedfs get externalsecret,secret seaweedfs-s3-config   # SecretSynced
+kubectl -n seaweedfs get pods                                        # seaweedfs-all-in-one-* Running
 ```
 
 ---
@@ -360,6 +401,7 @@ kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP
 |---|---|---|
 | ArgoCD | `http://<IP>:30080` | `admin` / `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' \| base64 -d` |
 | OpenBao | `http://<IP>:30200` | root token obtenu au `bao operator init` |
+| SeaweedFS S3 | `http://<IP>:30333` | `accessKey` / `secretKey` de `secret/seaweedfs/s3` |
 | Prometheus | `http://<IP>:30060` | — (si déployé) |
 | Grafana | `http://<IP>:30070` | `admin` / `admin` (si déployé) |
 
@@ -381,6 +423,7 @@ L'annotation `argocd.argoproj.io/sync-wave` ordonne la création des objets **au
 | `-1` | `argocd` | `root` | ArgoCD avant le reste |
 | `0` | `external-secrets-operator`, `openbao` | `root` | Composants indépendants |
 | `1` | `eso-config` | `root` | A besoin des CRDs installées par l'opérateur ESO |
+| `2` | `seaweedfs` | `root` | A besoin du `ClusterSecretStore` créé par `eso-config` |
 
 ---
 
@@ -500,6 +543,7 @@ Ce repo est un **lab local**. Plusieurs choix sont inacceptables en production :
 | Mot de passe Grafana `admin` en clair dans Git | `apps/platform/prometheus/application.yaml` | Secret externe (ESO) via `grafana.admin.existingSecret` |
 | ArgoCD en HTTP (`server.insecure: true`) | `manifests/argocd/values.yaml` + `argocd-values.yaml` (branche `bootstrap`) | TLS via Ingress |
 | Services en NodePort | plusieurs | Ingress + authentification |
+| SeaweedFS mono-pod, S3 en HTTP, identité S3 unique avec droits `Admin` | `manifests/seaweedfs/values.yaml`, `workloads/seaweedfs/` | Composants séparés et répliqués, TLS, une identité par client avec droits limités au bucket |
 | `clusterResourceWhitelist: */*` | `projects/infra-project.yaml` | Liste restreinte des kinds nécessaires |
 
 ---
@@ -514,3 +558,5 @@ Ce repo est un **lab local**. Plusieurs choix sont inacceptables en production :
 - ArgoCD — Sync waves : <https://argo-cd.readthedocs.io/en/stable/user-guide/sync-waves/>
 - External Secrets Operator : <https://external-secrets.io/>
 - OpenBao : <https://openbao.org/>
+- SeaweedFS (chart Helm) : <https://github.com/seaweedfs/seaweedfs/tree/master/k8s/charts/seaweedfs>
+- MLflow — stockage d'artefacts S3 : <https://mlflow.org/docs/latest/self-hosting/architecture/artifact-store/>

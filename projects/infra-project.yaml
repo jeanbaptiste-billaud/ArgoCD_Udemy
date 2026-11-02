@@ -12,6 +12,7 @@ spec:
     - https://argoproj.github.io/argo-helm
     - https://charts.external-secrets.io
     - https://openbao.github.io/openbao-helm
+    - https://seaweedfs.github.io/seaweedfs/helm
     - ghcr.io/prometheus-community/charts
   # Un namespace par application
   destinations:
@@ -21,6 +22,8 @@ spec:
       namespace: external-secrets  # operateur ESO
     - server: https://kubernetes.default.svc
       namespace: openbao           # OpenBao
+    - server: https://kubernetes.default.svc
+      namespace: seaweedfs         # SeaweedFS (S3 pour MLflow)
     - server: https://kubernetes.default.svc
       namespace: monitoring        # kube-prometheus-stack
     - server: https://kubernetes.default.svc

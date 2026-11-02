@@ -1,0 +1,39 @@
+# Configuration S3 de SeaweedFS generee a partir d'OpenBao (secret/seaweedfs/s3)
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: seaweedfs-s3-config
+  namespace: seaweedfs
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: openbao-backend
+    kind: ClusterSecretStore
+  target:
+    name: seaweedfs-s3-config
+    creationPolicy: Owner
+    template:
+      engineVersion: v2
+      data:
+        # Format attendu par "weed s3 -config" (cle imposee par le chart)
+        seaweedfs_s3_config: |
+          {
+            "identities": [
+              {
+                "name": "mlflow",
+                "credentials": [
+                  { "accessKey": "{{ .accessKey }}", "secretKey": "{{ .secretKey }}" }
+                ],
+                "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+              }
+            ]
+          }
+  data:
+    - secretKey: accessKey
+      remoteRef:
+        key: seaweedfs/s3
+        property: accessKey
+    - secretKey: secretKey
+      remoteRef:
+        key: seaweedfs/s3
+        property: secretKey
