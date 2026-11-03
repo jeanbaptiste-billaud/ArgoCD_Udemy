@@ -1,0 +1,180 @@
+# Job de rotation des cles S3 de MLflow : script (ConfigMap) + CronJob.
+# Etapes (chacune attend la fin de la precedente, arret a la premiere erreur) :
+#   1. nouvelle paire temporaire           (PushSecrets mlflow-s3-temp-*-push)
+#   2. lecture de la paire temporaire      (ExternalSecret mlflow-s3-temp)
+#   3. SeaweedFS accepte les deux paires   (ExternalSecret seaweedfs-s3-config + SIGHUP)
+#   4. verification de la paire temporaire (appel S3 signe)
+#   5. paire temporaire -> Secret officiel mlflow-s3-credentials
+#   6. push officiel                       (PushSecret mlflow-s3-credentials-push)
+#   7. MLflow redemarre sur la nouvelle paire, PUIS revocation de l'ancienne (SIGHUP)
+#   8. verifications finales
+# Les cles ne sont jamais affichees : les logs ne montrent que des empreintes sha256.
+# Lancement manuel :
+#   kubectl -n mlflow create job --from=cronjob/mlflow-s3-rotation mlflow-s3-rotation-manual
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mlflow-s3-rotation
+  namespace: mlflow
+data:
+  rotate.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+    NS=mlflow
+    S3_URL=http://seaweedfs-all-in-one.seaweedfs.svc:8333
+    MLFLOW_URL=http://mlflow.mlflow.svc:80
+
+    log()  { echo "[$(date +%T)] $*"; }
+    fail() { echo "ECHEC : $*"; exit 1; }
+    key()  { kubectl -n "$1" get secret "$2" -o go-template="{{index .data \"$3\" | base64decode}}"; }
+    fp()   { printf '%s' "$1" | sha256sum | cut -c1-12; }    # empreinte, jamais la valeur
+    stamp() { echo "$(date +%s)-$RANDOM"; }
+    s3()   { curl -s -o /dev/null -w '%{http_code}' --aws-sigv4 'aws:amz:us-east-1:s3' \
+               --user "$1:$2" "$S3_URL/mlflow?list-type=2&max-keys=1" </dev/null; }
+    mlflow_api() { curl -s -o /dev/null -w '%{http_code}' "$MLFLOW_URL/api/2.0/mlflow-artifacts/artifacts"; }
+    expect() { [ "$2" = "$3" ] && log "  OK   $1 : $3" || fail "$1 : attendu $2, obtenu $3"; }
+
+    # Declenche une ressource ESO par annotation et attend la fin de sa synchro
+    trigger() { # ns kind name
+      local before now ready
+      before=$(kubectl -n "$1" get "$2" "$3" -o jsonpath='{.status.refreshTime}')
+      kubectl -n "$1" annotate "$2" "$3" force-sync="$(stamp)" --overwrite >/dev/null
+      for _ in $(seq 1 120); do
+        sleep 0.5
+        now=$(kubectl -n "$1" get "$2" "$3" -o jsonpath='{.status.refreshTime}')
+        ready=$(kubectl -n "$1" get "$2" "$3" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+        [ "$now" != "$before" ] && [ "$ready" = True ] && { log "  $2/$3 synchronise"; return; }
+      done
+      fail "$2/$3 non synchronise"
+    }
+
+    # Recharge la config S3 de SeaweedFS sans redemarrage : attend que kubelet ait mis a
+    # jour le fichier monte (meme empreinte que le Secret), puis SIGHUP a weed (PID 1)
+    reload_seaweedfs() {
+      local want got pod rc_before rc_after since
+      want=$(key seaweedfs seaweedfs-s3-config seaweedfs_s3_config | sha256sum | cut -c1-64)
+      pod=$(kubectl -n seaweedfs get pod -l app.kubernetes.io/name=seaweedfs -o jsonpath='{.items[0].metadata.name}')
+      rc_before=$(kubectl -n seaweedfs get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}')
+      # Modifier le pod declenche une resynchro immediate de ses volumes par kubelet
+      kubectl -n seaweedfs annotate pod "$pod" s3-config-sync="$(stamp)" --overwrite >/dev/null
+      for _ in $(seq 1 90); do
+        got=$(kubectl -n seaweedfs exec "$pod" -- sha256sum /etc/sw/s3/seaweedfs_s3_config | cut -c1-64)
+        [ "$got" = "$want" ] && break
+        sleep 1
+      done
+      [ "$got" = "$want" ] || fail "fichier de config non mis a jour dans le pod $pod"
+      since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      kubectl -n seaweedfs exec "$pod" -- kill -HUP 1
+      sleep 1
+      rc_after=$(kubectl -n seaweedfs get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}')
+      [ "$rc_before" = "$rc_after" ] || fail "SeaweedFS a redemarre (restartCount $rc_before -> $rc_after)"
+      kubectl -n seaweedfs logs "$pod" --since-time="$since" | grep -q 'Loaded [0-9]* identities from config file' \
+        || fail "SeaweedFS n'a pas confirme le rechargement"
+      log "  config SeaweedFS rechargee (SIGHUP, sans redemarrage)"
+    }
+
+    OAK=$(key $NS mlflow-s3-credentials AWS_ACCESS_KEY_ID)
+    OSK=$(key $NS mlflow-s3-credentials AWS_SECRET_ACCESS_KEY)
+    log "Paire officielle de depart : access $(fp "$OAK") / secret $(fp "$OSK")"
+    expect "paire officielle de depart" 200 "$(s3 "$OAK" "$OSK")"
+    expect "MLflow API artefacts (depart)" 200 "$(mlflow_api)"
+
+    log "1. Nouvelle paire temporaire"
+    OLD_TSK=$(fp "$(key $NS mlflow-s3-temp AWS_SECRET_ACCESS_KEY)")
+    trigger $NS pushsecret mlflow-s3-temp-access-push
+    trigger $NS pushsecret mlflow-s3-temp-secret-push
+
+    log "2. Lecture de la paire temporaire"
+    trigger $NS externalsecret mlflow-s3-temp
+    TAK=$(key $NS mlflow-s3-temp AWS_ACCESS_KEY_ID)
+    TSK=$(key $NS mlflow-s3-temp AWS_SECRET_ACCESS_KEY)
+    [ "$(fp "$TSK")" != "$OLD_TSK" ] || fail "la paire temporaire n'a pas change"
+    log "  paire temporaire : access $(fp "$TAK") / secret $(fp "$TSK")"
+
+    log "3. SeaweedFS accepte les deux paires"
+    trigger seaweedfs externalsecret seaweedfs-s3-config
+    reload_seaweedfs
+
+    log "4. Verification"
+    expect "paire temporaire" 200 "$(s3 "$TAK" "$TSK")"
+    expect "paire officielle (encore valide)" 200 "$(s3 "$OAK" "$OSK")"
+
+    log "5. Paire temporaire -> Secret officiel mlflow-s3-credentials"
+    kubectl -n $NS patch secret mlflow-s3-credentials --type merge -p "$(printf \
+      '{"data":{"AWS_ACCESS_KEY_ID":"%s","AWS_SECRET_ACCESS_KEY":"%s"}}' \
+      "$(printf '%s' "$TAK" | base64 -w0)" "$(printf '%s' "$TSK" | base64 -w0)")" >/dev/null
+
+    log "6. Push officiel"
+    trigger $NS pushsecret mlflow-s3-credentials-push
+
+    log "7. MLflow sur la nouvelle paire (deja acceptee), puis revocation de l'ancienne"
+    trigger seaweedfs externalsecret seaweedfs-s3-config
+    kubectl -n $NS rollout restart deploy/mlflow >/dev/null
+    kubectl -n $NS rollout status deploy/mlflow --timeout=300s >/dev/null
+    log "  MLflow redemarre"
+    reload_seaweedfs
+
+    log "8. Verifications finales"
+    expect "nouvelle paire officielle" 200 "$(s3 "$TAK" "$TSK")"
+    expect "ancienne paire officielle (revoquee)" 403 "$(s3 "$OAK" "$OSK")"
+    expect "MLflow API artefacts (via S3)" 200 "$(mlflow_api)"
+    expect "cle d'acces chargee par MLflow" "$(fp "$TAK")" \
+      "$(fp "$(kubectl -n $NS exec deploy/mlflow -c mlflow -- printenv AWS_ACCESS_KEY_ID)")"
+    log "Rotation terminee en ${SECONDS} s"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mlflow-s3-rotation
+  namespace: mlflow
+spec:
+  schedule: "0 3 1 * *"              # le 1er de chaque mois a 03:00
+  timeZone: Europe/Paris
+  concurrencyPolicy: Forbid          # jamais deux rotations en parallele
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0                # pas de relance automatique : une rotation interrompue
+                                     # se diagnostique avant d'etre relancee
+      activeDeadlineSeconds: 900
+      template:
+        spec:
+          serviceAccountName: mlflow-s3-rotation
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: rotate
+              image: alpine/k8s:1.35.9   # kubectl + curl (SigV4) + bash
+              command: ["bash", "/scripts/rotate.sh"]
+              env:
+                - name: HOME             # cache kubectl
+                  value: /tmp
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 128Mi
+          volumes:
+            - name: scripts
+              configMap:
+                name: mlflow-s3-rotation
+            - name: tmp
+              emptyDir: {}

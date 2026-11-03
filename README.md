@@ -161,7 +161,9 @@ ArgoCD_Udemy/
 │           ├── s3-credentials.yaml    # ExternalSecret : OpenBao -> Secret Kubernetes (une seule fois)
 │           ├── s3-pushsecret.yaml     # PushSecret : Secret Kubernetes -> OpenBao
 │           ├── s3-temp-pushsecret.yaml # 2 PushSecrets : paire temporaire générée -> OpenBao (rotation)
-│           └── s3-temp-credentials.yaml # ExternalSecret : paire temporaire OpenBao -> Secret mlflow-s3-temp
+│           ├── s3-temp-credentials.yaml # ExternalSecret : paire temporaire OpenBao -> Secret mlflow-s3-temp
+│           ├── s3-rotation-rbac.yaml  # ServiceAccount + Roles (mlflow, seaweedfs) du job de rotation
+│           └── s3-rotation-cronjob.yaml # ConfigMap (script) + CronJob de rotation mensuelle
 └── roar-k8s-helm.yaml                 # exercice du cours, NON géré par le GitOps
 ```
 
@@ -369,7 +371,7 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/mlflow/values.
 - **`nodeport.yaml`** — `Service` `mlflow-nodeport` (NodePort 30500) ;
 - **`s3/`** — clés S3 de l'identité `mlflow` de SeaweedFS (voir ci-dessous).
 
-**Clés S3 de MLflow : le Secret Kubernetes fait foi.** Elles sont destinées à être renouvelées depuis le cluster (rotation à venir), d'où ce circuit :
+**Clés S3 de MLflow : le Secret Kubernetes fait foi.** Elles sont destinées à être renouvelées depuis le cluster (rotation mensuelle par un CronJob), d'où ce circuit :
 
 0. **`s3/s3-generators.yaml`** — deux générateurs ESO `Password` : `mlflow-s3-access-key` (20 caractères) et `mlflow-s3-secret-key` (40 caractères), alphanumériques. En S3, l'access key n'est qu'un identifiant, transmis en clair dans chaque requête ; c'est la secret key, qui signe les requêtes (SigV4) sans jamais circuler, qui protège l'accès. Ils servent à la paire officielle (étape 1) et à la paire temporaire (étape 5).
 1. **`s3/s3-bootstrap-pushsecret.yaml`** — PushSecrets `mlflow-s3-bootstrap-access-push` et `mlflow-s3-bootstrap-secret-push` (un par générateur) : écrivent la paire **officielle** `accessKey` / `secretKey` dans `secret/seaweedfs/s3`. Aucune clé `mlflow` ne passe entre des mains humaines. `updatePolicy: IfNotExists` : chaque propriété n'est écrite que si elle est absente, ces PushSecrets n'écrasent **jamais** la paire officielle. `refreshInterval: 0s` : un seul passage, à leur création. Si le chemin n'existe pas, ESO le crée avec la métadonnée `managed-by=external-secrets`, ce qui autorise les autres PushSecrets à y écrire.
@@ -379,14 +381,28 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/mlflow/values.
 5. **`s3/s3-temp-pushsecret.yaml`** — PushSecrets `mlflow-s3-temp-access-push` et `mlflow-s3-temp-secret-push` (un par générateur) : écrivent la paire **temporaire** `tempAccessKey` / `tempSecretKey` dans `secret/seaweedfs/s3`, à côté de la paire officielle sans l'écraser. C'est **la seule source de nouvelles clés** pour la rotation. Aucun Secret Kubernetes intermédiaire : la paire temporaire n'existe que dans OpenBao. `updatePolicy: Replace` + nouvelle génération à chaque push : **chaque déclenchement remplace la paire temporaire par une nouvelle**, sans interaction directe avec OpenBao. Toujours déclencher les **deux** ensemble, sinon on obtient une access key neuve avec une secret key ancienne.
 6. **`s3/s3-temp-credentials.yaml`** — `ExternalSecret` `mlflow-s3-temp` : recopie la paire temporaire dans le Secret `mlflow-s3-temp` (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, mêmes noms que le Secret officiel), pour que le job de rotation la lise sans accès direct à OpenBao. Les PushSecrets générés ne créent **aucun** Secret Kubernetes : la valeur générée n'existe qu'en mémoire le temps du push. `refreshPolicy: OnChange` : mis à jour uniquement quand l'ExternalSecret change (annotation comprise), à déclencher **après** la fin des push temporaires.
 
-**Principe de la rotation** (job à venir), étape par étape, chacune attendant la fin de la précédente :
+**Rotation : `s3/s3-rotation-cronjob.yaml`** — CronJob `mlflow-s3-rotation`, le 1er de chaque mois à 03:00 (Europe/Paris). Il exécute le script de la ConfigMap `mlflow-s3-rotation`, image `alpine/k8s` (kubectl, curl avec SigV4, bash). Étapes, chacune attendant la fin de la précédente (fin de synchro ESO : `status.refreshTime` modifié et `Ready=True`), arrêt à la première erreur :
 
 1. déclencher les deux PushSecrets temporaires (étape 5) : nouvelle paire temporaire dans OpenBao ;
 2. déclencher l'ExternalSecret `mlflow-s3-temp` (étape 6) et lire le Secret `mlflow-s3-temp` ;
-3. appliquer la paire temporaire côté SeaweedFS ;
-4. vérifier qu'elle est effective (appel S3 signé avec cette paire) ;
+3. SeaweedFS accepte les deux paires : rafraîchir `seaweedfs-s3-config`, puis recharger par `SIGHUP` (voir [SeaweedFS](#workloadsseaweedfss3-credentialsyaml)). Le script annote le pod SeaweedFS : modifier le pod force kubelet à resynchroniser ses volumes tout de suite (1 à 2 s au lieu d'une minute environ) ;
+4. vérifier la paire temporaire (appel S3 signé), et que l'ancienne fonctionne toujours ;
 5. l'écrire dans le Secret officiel `mlflow-s3-credentials` ;
-6. déclencher `mlflow-s3-credentials-push` : la paire officielle dans OpenBao prend les valeurs temporaires.
+6. déclencher `mlflow-s3-credentials-push` : la paire officielle dans OpenBao prend les valeurs temporaires ;
+7. redémarrer MLflow, qui lit ses clés en variables d'environnement, **puis** révoquer l'ancienne paire (nouveau `SIGHUP`). Dans cet ordre, car avec `maxSurge: 100%` l'ancien pod MLflow sert jusqu'à ce que le nouveau soit prêt : révoquer avant le casserait pendant ce temps ;
+8. vérifier : nouvelle paire 200, ancienne 403, API d'artefacts de MLflow 200, clé chargée par le pod MLflow.
+
+Les clés ne sont jamais affichées : les logs ne montrent que des empreintes sha256. Durée mesurée : environ 70 s, sans coupure de S3 ni de MLflow.
+
+```bash
+# Lancer une rotation à la main
+kubectl -n mlflow create job --from=cronjob/mlflow-s3-rotation mlflow-s3-rotation-manual
+kubectl -n mlflow logs -f job/mlflow-s3-rotation-manual
+```
+
+`backoffLimit: 0` : pas de relance automatique. Le script n'est pas rejouable à l'aveugle après un échec au-delà de l'étape 5 (Secret officiel déjà modifié) : lire les logs avant de relancer. `concurrencyPolicy: Forbid` : jamais deux rotations en parallèle.
+
+**Droits : `s3/s3-rotation-rbac.yaml`** — ServiceAccount `mlflow-s3-rotation` et un `Role` dans chaque namespace touché, limités aux objets de la rotation (`resourceNames`) quand l'API le permet. Dans `mlflow` : `get`/`patch` sur les trois PushSecrets, l'ExternalSecret `mlflow-s3-temp` et le Secret `mlflow-s3-credentials`, redémarrage du Deployment `mlflow`, `exec` pour la vérification finale. Dans `seaweedfs` : `get`/`patch` sur l'ExternalSecret `seaweedfs-s3-config`, `patch` des pods (annotation), `pods/exec` (sha256 du fichier monté, `kill -HUP 1`), `pods/log`. `pods/exec` sur SeaweedFS donne un accès complet à son conteneur : c'est le droit le plus sensible du job.
 
 **Les ressources de rotation (`mlflow-s3-credentials-push`, `mlflow-s3-temp-access-push`, `mlflow-s3-temp-secret-push`, `mlflow-s3-temp`) sont déclenchées à la demande** (`refreshInterval: 0s` ou `refreshPolicy: OnChange`) : ils poussent à leur création, puis seulement quand l'objet PushSecret change (spec, labels ou annotations). Une modification du Secret source ne déclenche **rien** : ESO ne surveille pas les Secrets sources. Ils ne servent qu'à la rotation, qui les déclenche en changeant une annotation :
 
