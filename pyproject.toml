@@ -1,0 +1,17 @@
+[project]
+name = "argocd-udemy"
+version = "0.1.0"
+description = "Outils de gestion des secrets du cluster (package local pyESO)"
+requires-python = ">=3.14"
+dependencies = [
+    "kubernetes>=37",     # pyESO
+    "botocore>=1.43.123", # s3_rotation : signature SigV4 des appels S3
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Package local : seul pyESO est installe (les scripts d'application l'importent)
+[tool.hatch.build.targets.wheel]
+packages = ["pyESO"]
