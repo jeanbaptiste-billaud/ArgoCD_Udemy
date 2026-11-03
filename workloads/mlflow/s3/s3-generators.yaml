@@ -1,0 +1,30 @@
+# Generateurs des cles S3 de l'identite "mlflow" de SeaweedFS, utilises par :
+#   - s3-bootstrap-pushsecret.yaml : paire initiale (accessKey / secretKey)
+#   - s3-temp-pushsecret.yaml      : paire temporaire de rotation (tempAccessKey / tempSecretKey)
+# Chaque generateur produit une cle "password" ; elles sont alphanumeriques uniquement.
+
+# Access key : identifiant, transmis en clair dans chaque requete S3 (20 caracteres, comme AWS)
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: mlflow-s3-access-key
+  namespace: mlflow
+spec:
+  length: 20
+  digits: 6
+  symbols: 0
+  noUpper: false
+  allowRepeat: true
+---
+# Secret key : signe les requetes (SigV4) sans jamais circuler, porte la securite (40 caracteres)
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: mlflow-s3-secret-key
+  namespace: mlflow
+spec:
+  length: 40
+  digits: 10
+  symbols: 0
+  noUpper: false
+  allowRepeat: true
