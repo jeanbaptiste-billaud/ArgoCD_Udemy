@@ -299,7 +299,19 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/seaweedfs/valu
 
 L'identité `mlflow` a **deux credentials** : pendant une rotation, l'ancienne et la nouvelle paire sont valides en même temps, ce qui permet de tester la nouvelle avant de basculer MLflow. Après la rotation, les deux paires sont identiques.
 
-La config n'est lue **qu'au démarrage** de SeaweedFS : après une modification (fichier ou clés dans OpenBao), redémarrer le pod.
+La config est lue au démarrage de SeaweedFS, et peut être **rechargée sans redémarrage** par un `SIGHUP` au process `weed` (PID 1 du conteneur). Quand `-s3.config` est défini, SeaweedFS relit le fichier sur ce signal (`weed/s3api/s3api_server.go`) et logue `Loaded N identities from config file …`. Après une modification (fichier ou clés dans OpenBao) :
+
+1. rafraîchir l'`ExternalSecret` `seaweedfs-s3-config` (ou attendre son refresh, ≤ 1 h) ;
+2. attendre que kubelet ait mis à jour le fichier monté dans le pod : de quelques secondes à environ 1 min. Le Secret est monté **sans `subPath`**, condition nécessaire à cette mise à jour. Pour le vérifier, comparer `sha256sum /etc/sw/s3/seaweedfs_s3_config` dans le pod avec le contenu du Secret ;
+3. envoyer le signal :
+
+```bash
+kubectl -n seaweedfs exec deploy/seaweedfs-all-in-one -- kill -HUP 1
+```
+
+Un `SIGHUP` envoyé trop tôt recharge l'ancienne version du fichier. Redémarrer le pod (`kubectl -n seaweedfs rollout restart deploy/seaweedfs-all-in-one`) fonctionne aussi, mais coupe S3 quelques dizaines de secondes (un seul pod all-in-one).
+
+> Pourquoi pas la configuration **Filer-based** ([S3 Credentials](https://github.com/seaweedfs/seaweedfs/wiki/S3-Credentials)), elle aussi rechargée à chaud ? Le fichier `-s3.config` a priorité et **remplace entièrement** la config du filer, sans fusion. Il faudrait donc retirer `-s3.config`, gérer les identités avec `weed shell`, et la source de vérité quitterait OpenBao.
 
 Lister les identités réellement chargées (clés masquées) :
 
@@ -387,7 +399,7 @@ kubectl -n mlflow annotate externalsecret mlflow-s3-temp force-sync=$(date +%s) 
 
 Cette annotation n'étant pas dans Git, ArgoCD ne la voit pas comme une dérive.
 
-Modifier le Secret `mlflow-s3-credentials` puis déclencher son PushSecret propage donc les clés à OpenBao, puis à SeaweedFS (rafraîchissement ≤ 1 h **et** redémarrage du pod SeaweedFS, qui ne lit sa config qu'au démarrage). Ne pas modifier `secret/seaweedfs/s3` directement dans OpenBao : le prochain déclenchement du PushSecret le réécrirait avec la valeur du Secret.
+Modifier le Secret `mlflow-s3-credentials` puis déclencher son PushSecret propage donc les clés à OpenBao, puis à SeaweedFS (rafraîchissement de l'`ExternalSecret` ≤ 1 h, mise à jour du fichier monté, **puis `SIGHUP`**, voir [SeaweedFS](#workloadsseaweedfss3-credentialsyaml)). Ne pas modifier `secret/seaweedfs/s3` directement dans OpenBao : le prochain déclenchement du PushSecret le réécrirait avec la valeur du Secret.
 
 > ESO refuse d'écrire dans un secret OpenBao qu'il n'a pas créé (`secret not managed by external-secrets`) : il vérifie la métadonnée `managed-by=external-secrets`, qu'il pose lui-même quand il crée le chemin. Ne pas créer `secret/seaweedfs/s3` à la main, sinon tous les PushSecrets échouent. Si c'est déjà fait : `bao kv metadata put -custom-metadata=managed-by=external-secrets secret/seaweedfs/s3`. Cette métadonnée ne peut pas être posée depuis un PushSecret : le provider Vault ignore les labels du template et les `metadata` des entrées.
 
@@ -498,7 +510,7 @@ kubectl -n openbao exec openbao-0 -- sh -c \
 
 Les clés de l'identité `mlflow` (`secret/seaweedfs/s3`) sont **générées par ESO** à la synchronisation de l'Application `mlflow` (`mlflow-s3-bootstrap-access-push` / `mlflow-s3-bootstrap-secret-push`). Ne **pas** créer ce chemin à la main, sinon ESO refuse d'y écrire (voir [MLflow](#appsplatformmlflowapplicationyaml)). D'ici là, l'`ExternalSecret` de SeaweedFS (wave `2`) est en erreur et réessaie : c'est normal, `mlflow` est en wave `3`.
 
-ESO crée alors le Secret `seaweedfs-s3-config` et le pod SeaweedFS démarre. Les clés `mlflow` sont aussi utilisées par MLflow : après l'amorçage, c'est le Secret Kubernetes `mlflow-s3-credentials` qui fait foi (voir [MLflow](#appsplatformmlflowapplicationyaml)). La config S3 de SeaweedFS n'est lue qu'au démarrage : après un changement de clés, `kubectl -n seaweedfs rollout restart deploy/seaweedfs-all-in-one`.
+ESO crée alors le Secret `seaweedfs-s3-config` et le pod SeaweedFS démarre. Les clés `mlflow` sont aussi utilisées par MLflow : après l'amorçage, c'est le Secret Kubernetes `mlflow-s3-credentials` qui fait foi (voir [MLflow](#appsplatformmlflowapplicationyaml)). Après un changement de clés, recharger la config S3 de SeaweedFS par `SIGHUP`, sans redémarrage (voir [SeaweedFS](#workloadsseaweedfss3-credentialsyaml)).
 
 ### 6. Superutilisateur PostgreSQL
 
