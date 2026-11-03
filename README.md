@@ -160,7 +160,8 @@ ArgoCD_Udemy/
 │           ├── s3-bootstrap-pushsecret.yaml # 2 PushSecrets : paire officielle générée -> OpenBao (une seule fois)
 │           ├── s3-credentials.yaml    # ExternalSecret : OpenBao -> Secret Kubernetes (une seule fois)
 │           ├── s3-pushsecret.yaml     # PushSecret : Secret Kubernetes -> OpenBao
-│           └── s3-temp-pushsecret.yaml # 2 PushSecrets : paire temporaire générée -> OpenBao (rotation)
+│           ├── s3-temp-pushsecret.yaml # 2 PushSecrets : paire temporaire générée -> OpenBao (rotation)
+│           └── s3-temp-credentials.yaml # ExternalSecret : paire temporaire OpenBao -> Secret mlflow-s3-temp
 └── roar-k8s-helm.yaml                 # exercice du cours, NON géré par le GitOps
 ```
 
@@ -362,15 +363,24 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/mlflow/values.
 3. **`s3/s3-pushsecret.yaml`** — `PushSecret` `mlflow-s3-credentials-push` : renvoie ce Secret vers `secret/seaweedfs/s3` (`accessKey` / `secretKey`), les **mêmes** emplacements qu'à l'étape 2. Il ne génère **rien** : il recopie seulement le Secret Kubernetes. `deletionPolicy: None` : supprimer le PushSecret ne supprime rien dans OpenBao.
 4. SeaweedFS lit `secret/seaweedfs/s3` pour son identité `mlflow` (`workloads/seaweedfs/s3-credentials.yaml`).
 5. **`s3/s3-temp-pushsecret.yaml`** — PushSecrets `mlflow-s3-temp-access-push` et `mlflow-s3-temp-secret-push` (un par générateur) : écrivent la paire **temporaire** `tempAccessKey` / `tempSecretKey` dans `secret/seaweedfs/s3`, à côté de la paire officielle sans l'écraser. C'est **la seule source de nouvelles clés** pour la rotation. Aucun Secret Kubernetes intermédiaire : la paire temporaire n'existe que dans OpenBao. `updatePolicy: Replace` + nouvelle génération à chaque push : **chaque déclenchement remplace la paire temporaire par une nouvelle**, sans interaction directe avec OpenBao. Toujours déclencher les **deux** ensemble, sinon on obtient une access key neuve avec une secret key ancienne.
+6. **`s3/s3-temp-credentials.yaml`** — `ExternalSecret` `mlflow-s3-temp` : recopie la paire temporaire dans le Secret `mlflow-s3-temp` (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, mêmes noms que le Secret officiel), pour que le job de rotation la lise sans accès direct à OpenBao. Les PushSecrets générés ne créent **aucun** Secret Kubernetes : la valeur générée n'existe qu'en mémoire le temps du push. `refreshPolicy: OnChange` : mis à jour uniquement quand l'ExternalSecret change (annotation comprise), à déclencher **après** la fin des push temporaires.
 
-**Principe de la rotation** : la paire temporaire est générée (étape 5) ; une fois que l'application a accepté la nouvelle paire, la paire officielle reçoit les valeurs de la paire temporaire (Secret `mlflow-s3-credentials` mis à jour, puis repoussé par `mlflow-s3-credentials-push`).
+**Principe de la rotation** (job à venir), étape par étape, chacune attendant la fin de la précédente :
 
-**Les PushSecrets de rotation (`mlflow-s3-credentials-push`, `mlflow-s3-temp-access-push`, `mlflow-s3-temp-secret-push`) sont déclenchés à la demande** (`refreshInterval: 0s`) : ils poussent à leur création, puis seulement quand l'objet PushSecret change (spec, labels ou annotations). Une modification du Secret source ne déclenche **rien** : ESO ne surveille pas les Secrets sources. Ils ne servent qu'à la rotation, qui les déclenche en changeant une annotation :
+1. déclencher les deux PushSecrets temporaires (étape 5) : nouvelle paire temporaire dans OpenBao ;
+2. déclencher l'ExternalSecret `mlflow-s3-temp` (étape 6) et lire le Secret `mlflow-s3-temp` ;
+3. appliquer la paire temporaire côté SeaweedFS ;
+4. vérifier qu'elle est effective (appel S3 signé avec cette paire) ;
+5. l'écrire dans le Secret officiel `mlflow-s3-credentials` ;
+6. déclencher `mlflow-s3-credentials-push` : la paire officielle dans OpenBao prend les valeurs temporaires.
+
+**Les ressources de rotation (`mlflow-s3-credentials-push`, `mlflow-s3-temp-access-push`, `mlflow-s3-temp-secret-push`, `mlflow-s3-temp`) sont déclenchées à la demande** (`refreshInterval: 0s` ou `refreshPolicy: OnChange`) : ils poussent à leur création, puis seulement quand l'objet PushSecret change (spec, labels ou annotations). Une modification du Secret source ne déclenche **rien** : ESO ne surveille pas les Secrets sources. Ils ne servent qu'à la rotation, qui les déclenche en changeant une annotation :
 
 ```bash
 kubectl -n mlflow annotate pushsecret mlflow-s3-credentials-push force-sync=$(date +%s) --overwrite
 kubectl -n mlflow annotate pushsecret mlflow-s3-temp-access-push mlflow-s3-temp-secret-push \
   force-sync=$(date +%s) --overwrite
+kubectl -n mlflow annotate externalsecret mlflow-s3-temp force-sync=$(date +%s) --overwrite
 ```
 
 Cette annotation n'étant pas dans Git, ArgoCD ne la voit pas comme une dérive.
