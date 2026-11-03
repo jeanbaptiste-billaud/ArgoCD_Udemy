@@ -295,7 +295,9 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/seaweedfs/valu
 | Identité | Clés lues dans OpenBao | Droits |
 |---|---|---|
 | `admin` | `secret/seaweedfs/admin` | `Admin`, `Read`, `Write`, `List`, `Tagging` sur tous les buckets |
-| `mlflow` | `secret/seaweedfs/s3` | `Read`, `Write`, `List`, `Tagging` sur le bucket `mlflow` uniquement (`Read:mlflow`…) |
+| `mlflow` | `secret/seaweedfs/s3` : paire officielle (`accessKey` / `secretKey`) **et** paire temporaire de rotation (`tempAccessKey` / `tempSecretKey`) | `Read`, `Write`, `List`, `Tagging` sur le bucket `mlflow` uniquement (`Read:mlflow`…) |
+
+L'identité `mlflow` a **deux credentials** : pendant une rotation, l'ancienne et la nouvelle paire sont valides en même temps, ce qui permet de tester la nouvelle avant de basculer MLflow. Après la rotation, les deux paires sont identiques.
 
 La config n'est lue **qu'au démarrage** de SeaweedFS : après une modification (fichier ou clés dans OpenBao), redémarrer le pod.
 
