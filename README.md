@@ -30,11 +30,13 @@ uv.lock           # versions figées des dépendances
 Le CronJob `mlflow-s3-rotation` (`main:workloads/mlflow/s3/s3-rotation-cronjob.yaml`) :
 
 1. un init container clone **cette branche** (`git clone --depth 1 --branch pyeso`) dans un `emptyDir` ;
-2. le conteneur principal (image `ghcr.io/astral-sh/uv`) installe les dépendances de `uv.lock` et lance le script :
+2. le conteneur principal (image `ghcr.io/astral-sh/uv`) installe les dépendances de `uv.lock`, sans construire le projet (`pyESO` est importé via `PYTHONPATH=/src`), et lance le script :
 
 ```bash
-uv run --frozen --no-install-project s3_rotation/rotate_mlflow.py
+uv sync --frozen --no-install-project --quiet && exec /tmp/venv/bin/python s3_rotation/rotate_mlflow.py
 ```
+
+`uv run` n'accepte pas `--no-install-project`, d'où le `uv sync` séparé.
 
 Pas d'image à construire : un commit poussé sur `pyeso` est utilisé à la rotation suivante. `--frozen` garantit les versions de `uv.lock`.
 
