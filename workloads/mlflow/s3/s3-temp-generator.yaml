@@ -1,0 +1,13 @@
+# Generateur de la cle temporaire S3 de MLflow, consomme par s3-temp-pushsecret.yaml.
+# La valeur n'existe que dans OpenBao : aucun Secret Kubernetes n'est cree.
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: mlflow-s3-temp-key
+  namespace: mlflow
+spec:
+  length: 20
+  digits: 6
+  symbols: 0                # cle d'acces S3 : alphanumerique uniquement
+  noUpper: false
+  allowRepeat: true
