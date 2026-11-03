@@ -160,8 +160,8 @@ ArgoCD_Udemy/
 │           ├── s3-bootstrap-pushsecret.yaml # PushSecret : clés générées -> OpenBao (une seule fois)
 │           ├── s3-credentials.yaml    # ExternalSecret : OpenBao -> Secret Kubernetes (une seule fois)
 │           ├── s3-pushsecret.yaml     # PushSecret : Secret Kubernetes -> OpenBao
-│           ├── s3-temp-generator.yaml  # Generator Password : clé temporaire
-│           └── s3-temp-pushsecret.yaml # PushSecret : clé temporaire générée -> OpenBao (tempAccessKey)
+│           ├── s3-temp-generator.yaml  # Generator Password : paire de clés temporaire
+│           └── s3-temp-pushsecret.yaml # PushSecret : paire temporaire générée -> OpenBao (tempAccessKey/tempSecretKey)
 └── roar-k8s-helm.yaml                 # exercice du cours, NON géré par le GitOps
 ```
 
@@ -361,7 +361,7 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/mlflow/values.
 1. **`s3/s3-credentials.yaml`** — `ExternalSecret` `mlflow-s3-credentials`, `refreshPolicy: CreatedOnce` : crée **une seule fois** le Secret `mlflow-s3-credentials` (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) depuis OpenBao `secret/seaweedfs/s3`, puis ne le modifie plus. `creationPolicy: Orphan` : le Secret survit à la suppression de l'`ExternalSecret`.
 2. **`s3/s3-pushsecret.yaml`** — `PushSecret` `mlflow-s3-credentials-push` : renvoie ce Secret vers `secret/seaweedfs/s3` (`accessKey` / `secretKey`), les **mêmes** emplacements qu'à l'étape 1. `deletionPolicy: None` : supprimer le PushSecret ne supprime rien dans OpenBao.
 3. SeaweedFS lit `secret/seaweedfs/s3` pour son identité `mlflow` (`workloads/seaweedfs/s3-credentials.yaml`).
-4. **`s3/s3-temp-generator.yaml`** + **`s3/s3-temp-pushsecret.yaml`** — générateur ESO `Password` `mlflow-s3-temp-key` (20 caractères alphanumériques) et `PushSecret` `mlflow-s3-temp-push` qui écrit sa valeur directement dans `secret/seaweedfs/s3`, propriété **`tempAccessKey`**, à côté des clés actives sans les écraser. Aucun Secret Kubernetes intermédiaire : la clé temporaire n'existe que dans OpenBao. Le générateur produit une nouvelle valeur à chaque push et `updatePolicy: Replace` l'écrit : **chaque déclenchement du PushSecret remplace `tempAccessKey` par une nouvelle clé**, sans interaction directe avec OpenBao.
+4. **`s3/s3-temp-generator.yaml`** + **`s3/s3-temp-pushsecret.yaml`** — générateur ESO `Password` `mlflow-s3-temp-key` (`tempAccessKey` / `tempSecretKey`, 40 caractères alphanumériques) et `PushSecret` `mlflow-s3-temp-push` qui écrit cette **paire** directement dans `secret/seaweedfs/s3`, à côté des clés actives sans les écraser. C'est une paire complète parce qu'en S3 l'`accessKey` n'est qu'un identifiant, transmis en clair dans chaque requête : c'est la `secretKey`, qui signe les requêtes (SigV4) sans jamais circuler, qui protège l'accès. Une rotation doit donc renouveler les deux. Aucun Secret Kubernetes intermédiaire : la paire temporaire n'existe que dans OpenBao. Le générateur produit de nouvelles valeurs à chaque push et `updatePolicy: Replace` les écrit : **chaque déclenchement du PushSecret remplace la paire temporaire par une nouvelle**, sans interaction directe avec OpenBao.
 
 **Les PushSecrets de rotation (`mlflow-s3-credentials-push`, `mlflow-s3-temp-push`) sont déclenchés à la demande** (`refreshInterval: 0s`) : ils poussent à leur création, puis seulement quand l'objet PushSecret change (spec, labels ou annotations). Une modification du Secret source ne déclenche **rien** : ESO ne surveille pas les Secrets sources. Ils ne servent qu'à la rotation, qui les déclenche en changeant une annotation :
 
