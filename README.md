@@ -356,11 +356,20 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/mlflow/values.
 **Clés S3 de MLflow : le Secret Kubernetes fait foi.** Elles sont destinées à être renouvelées depuis le cluster (rotation à venir), d'où ce circuit :
 
 1. **`s3/s3-credentials.yaml`** — `ExternalSecret` `mlflow-s3-credentials`, `refreshPolicy: CreatedOnce` : crée **une seule fois** le Secret `mlflow-s3-credentials` (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) depuis OpenBao `secret/seaweedfs/s3`, puis ne le modifie plus. `creationPolicy: Orphan` : le Secret survit à la suppression de l'`ExternalSecret`.
-2. **`s3/s3-pushsecret.yaml`** — `PushSecret` `mlflow-s3-credentials-push` : toutes les 5 min, renvoie ce Secret vers `secret/seaweedfs/s3` (`accessKey` / `secretKey`), les **mêmes** emplacements qu'à l'étape 1. `deletionPolicy: None` : supprimer le PushSecret ne supprime rien dans OpenBao.
+2. **`s3/s3-pushsecret.yaml`** — `PushSecret` `mlflow-s3-credentials-push` : renvoie ce Secret vers `secret/seaweedfs/s3` (`accessKey` / `secretKey`), les **mêmes** emplacements qu'à l'étape 1. `deletionPolicy: None` : supprimer le PushSecret ne supprime rien dans OpenBao.
 3. SeaweedFS lit `secret/seaweedfs/s3` pour son identité `mlflow` (`workloads/seaweedfs/s3-credentials.yaml`).
-4. **`s3/s3-temp-generator.yaml`** + **`s3/s3-temp-pushsecret.yaml`** — générateur ESO `Password` `mlflow-s3-temp-key` (20 caractères alphanumériques) et `PushSecret` `mlflow-s3-temp-push` qui écrit sa valeur directement dans `secret/seaweedfs/s3`, propriété **`tempAccessKey`**, à côté des clés actives sans les écraser. Aucun Secret Kubernetes intermédiaire : la clé temporaire n'existe que dans OpenBao. `updatePolicy: IfNotExists` : la propriété n'est écrite que si elle est absente (ESO vérifie la propriété, pas seulement le chemin), le générateur ne la régénère donc pas à chaque refresh. Pour en obtenir une nouvelle, supprimer la propriété dans OpenBao.
+4. **`s3/s3-temp-generator.yaml`** + **`s3/s3-temp-pushsecret.yaml`** — générateur ESO `Password` `mlflow-s3-temp-key` (20 caractères alphanumériques) et `PushSecret` `mlflow-s3-temp-push` qui écrit sa valeur directement dans `secret/seaweedfs/s3`, propriété **`tempAccessKey`**, à côté des clés actives sans les écraser. Aucun Secret Kubernetes intermédiaire : la clé temporaire n'existe que dans OpenBao. `updatePolicy: IfNotExists` : la propriété n'est écrite que si elle est absente (ESO vérifie la propriété, pas seulement le chemin), le générateur n'écrase donc jamais une clé existante. Pour en obtenir une nouvelle, supprimer la propriété dans OpenBao puis déclencher le PushSecret.
 
-Modifier le Secret `mlflow-s3-credentials` se propage donc à OpenBao (≤ 5 min), puis à SeaweedFS (rafraîchissement ≤ 1 h **et** redémarrage du pod SeaweedFS, qui ne lit sa config qu'au démarrage). Ne pas modifier `secret/seaweedfs/s3` directement dans OpenBao : le PushSecret le réécrirait avec la valeur du Secret.
+**Les deux PushSecrets sont déclenchés à la demande** (`refreshInterval: 0s`) : ils poussent à leur création, puis seulement quand l'objet PushSecret change (spec, labels ou annotations). Une modification du Secret source ne déclenche **rien** : ESO ne surveille pas les Secrets sources. Ils ne servent qu'à la rotation, qui les déclenche en changeant une annotation :
+
+```bash
+kubectl -n mlflow annotate pushsecret mlflow-s3-credentials-push force-sync=$(date +%s) --overwrite
+kubectl -n mlflow annotate pushsecret mlflow-s3-temp-push force-sync=$(date +%s) --overwrite
+```
+
+Cette annotation n'étant pas dans Git, ArgoCD ne la voit pas comme une dérive.
+
+Modifier le Secret `mlflow-s3-credentials` puis déclencher son PushSecret propage donc les clés à OpenBao, puis à SeaweedFS (rafraîchissement ≤ 1 h **et** redémarrage du pod SeaweedFS, qui ne lit sa config qu'au démarrage). Ne pas modifier `secret/seaweedfs/s3` directement dans OpenBao : le prochain déclenchement du PushSecret le réécrirait avec la valeur du Secret.
 
 > ESO refuse d'écrire dans un secret OpenBao qu'il n'a pas créé (`secret not managed by external-secrets`). `secret/seaweedfs/s3` étant créé à la main, il faut lui ajouter la métadonnée `managed-by=external-secrets` (voir [Prérequis manuels](#prérequis-manuels-secrets)).
 
