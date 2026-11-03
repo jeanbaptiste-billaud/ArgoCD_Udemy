@@ -2,12 +2,13 @@
 
 Lab GitOps d'un cluster Kubernetes local (MicroK8s sous WSL2), entièrement piloté par **ArgoCD** selon le pattern **app-of-apps**.
 
-Le repo a **deux branches** :
+Le repo a **trois branches** :
 
 | Branche | Contenu | Usage |
 |---|---|---|
 | **`bootstrap`** | Scripts d'installation (MicroK8s, ArgoCD) + `root-app.yaml` | Téléchargée une seule fois pour installer le cluster |
 | **`main`** | Toutes les Applications et leur configuration | Seule source de vérité ensuite |
+| **`pyeso`** | Outils Python : package `pyESO` + scripts de rotation (`s3_rotation/`), projet uv | Clonée au démarrage par les CronJobs (voir son README) |
 
 Une fois le bootstrap effectué, **Git est la seule source de vérité** : toute modification du cluster passe par un commit sur `main`, qu'ArgoCD applique automatiquement. `main` ne dépend jamais de la branche `bootstrap`.
 
@@ -163,7 +164,7 @@ ArgoCD_Udemy/
 │           ├── s3-temp-pushsecret.yaml # 2 PushSecrets : paire temporaire générée -> OpenBao (rotation)
 │           ├── s3-temp-credentials.yaml # ExternalSecret : paire temporaire OpenBao -> Secret mlflow-s3-temp
 │           ├── s3-rotation-rbac.yaml  # ServiceAccount + Roles (mlflow, seaweedfs) du job de rotation
-│           └── s3-rotation-cronjob.yaml # ConfigMap (script) + CronJob de rotation mensuelle
+│           └── s3-rotation-cronjob.yaml # CronJob de rotation mensuelle (code : branche pyeso)
 └── roar-k8s-helm.yaml                 # exercice du cours, NON géré par le GitOps
 ```
 
@@ -172,10 +173,11 @@ ArgoCD_Udemy/
 | Dossier | Contient | Synchronisé par | Règle |
 |---|---|---|---|
 | branche `bootstrap` | Scripts d'installation + point d'entrée | appliqué à la main, une fois | Ne contient que ce qui est nécessaire *avant* qu'ArgoCD tourne |
+| branche `pyeso` | Code Python exécuté par les CronJobs | cloné par le CronJob à chaque exécution | Branche orpheline : pas de code applicatif sur `main` |
 | `projects/` | Uniquement des `AppProject` | `root-projects` | Un fichier par projet |
 | `apps/` | Uniquement des `Application` ArgoCD | `root` (récursif) | Un dossier par composant, un fichier `application.yaml`. **Aucun autre YAML** (sinon `root` essaie de l'appliquer) |
 | `manifests/` | Fichiers de values Helm | lus via `$values` par une Application | Jamais synchronisé directement |
-| `workloads/` | Manifests Kubernetes classiques | une Application de `apps/` qui pointe dessus | Jamais synchronisé directement par une app racine. **Un fichier par ressource** |
+| `workloads/` | Manifests Kubernetes classiques | une Application de `apps/` qui pointe dessus | Jamais synchronisé directement par une app racine. **Un fichier par rôle fonctionnel** (plusieurs ressources possibles) |
 
 > ⚠️ Un objet Kubernetes ne doit être défini **qu'à un seul endroit**. Si deux Applications gèrent le même objet, elles le réécrivent chacune leur tour et passent en OutOfSync en boucle (c'est arrivé avec l'AppProject `infra`, voir [Pièges connus](#choix-techniques-et-pièges-connus)).
 
@@ -381,7 +383,7 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/mlflow/values.
 5. **`s3/s3-temp-pushsecret.yaml`** — PushSecrets `mlflow-s3-temp-access-push` et `mlflow-s3-temp-secret-push` (un par générateur) : écrivent la paire **temporaire** `tempAccessKey` / `tempSecretKey` dans `secret/seaweedfs/s3`, à côté de la paire officielle sans l'écraser. C'est **la seule source de nouvelles clés** pour la rotation. Aucun Secret Kubernetes intermédiaire : la paire temporaire n'existe que dans OpenBao. `updatePolicy: Replace` + nouvelle génération à chaque push : **chaque déclenchement remplace la paire temporaire par une nouvelle**, sans interaction directe avec OpenBao. Toujours déclencher les **deux** ensemble, sinon on obtient une access key neuve avec une secret key ancienne.
 6. **`s3/s3-temp-credentials.yaml`** — `ExternalSecret` `mlflow-s3-temp` : recopie la paire temporaire dans le Secret `mlflow-s3-temp` (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, mêmes noms que le Secret officiel), pour que le job de rotation la lise sans accès direct à OpenBao. Les PushSecrets générés ne créent **aucun** Secret Kubernetes : la valeur générée n'existe qu'en mémoire le temps du push. `refreshPolicy: OnChange` : mis à jour uniquement quand l'ExternalSecret change (annotation comprise), à déclencher **après** la fin des push temporaires.
 
-**Rotation : `s3/s3-rotation-cronjob.yaml`** — CronJob `mlflow-s3-rotation`, le 1er de chaque mois à 03:00 (Europe/Paris). Il exécute le script de la ConfigMap `mlflow-s3-rotation`, image `alpine/k8s` (kubectl, curl avec SigV4, bash). Étapes, chacune attendant la fin de la précédente (fin de synchro ESO : `status.refreshTime` modifié et `Ready=True`), arrêt à la première erreur :
+**Rotation : `s3/s3-rotation-cronjob.yaml`** — CronJob `mlflow-s3-rotation`, le 1er de chaque mois à 03:00 (Europe/Paris). Le code vient de la branche **`pyeso`**, sans image à construire : un init container `alpine/git` la clone (`--depth 1`) dans un `emptyDir`, puis le conteneur principal (image `ghcr.io/astral-sh/uv`, Python 3.14) installe les dépendances figées par `uv.lock` et lance `s3_rotation/rotate_mlflow.py` (`uv run --frozen --no-install-project`). Un commit poussé sur `pyeso` est utilisé à la rotation suivante. Le pod doit pouvoir joindre GitHub et PyPI. Étapes, chacune attendant la fin de la précédente (fin de synchro ESO : `status.refreshTime` modifié et `Ready=True`), arrêt à la première erreur :
 
 1. déclencher les deux PushSecrets temporaires (étape 5) : nouvelle paire temporaire dans OpenBao ;
 2. déclencher l'ExternalSecret `mlflow-s3-temp` (étape 6) et lire le Secret `mlflow-s3-temp` ;
