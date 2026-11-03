@@ -44,6 +44,7 @@ spec:
           initContainers:
             - name: clone
               image: alpine/git:2.52.0
+              command: ["git"]          # explicite (c'est aussi l'ENTRYPOINT de l'image)
               args:
                 - clone
                 - --depth=1
