@@ -1,0 +1,16 @@
+# Generateur des cles S3 initiales de l'identite "mlflow" de SeaweedFS,
+# consomme par s3-bootstrap-pushsecret.yaml. Produit les deux cles en une fois.
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: mlflow-s3-key
+  namespace: mlflow
+spec:
+  secretKeys:
+    - accessKey
+    - secretKey
+  length: 40
+  digits: 10
+  symbols: 0                # cles S3 : alphanumeriques uniquement
+  noUpper: false
+  allowRepeat: true

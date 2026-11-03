@@ -156,7 +156,9 @@ ArgoCD_Udemy/
 │       ├── postgres-credentials.yaml  # ExternalSecret : accès à la base mlflow
 │       ├── nodeport.yaml              # Service NodePort 30500
 │       └── s3/
-│           ├── s3-credentials.yaml    # ExternalSecret : amorçage des clés S3 (une seule fois)
+│           ├── s3-bootstrap-generator.yaml  # Generator Password : clés S3 initiales
+│           ├── s3-bootstrap-pushsecret.yaml # PushSecret : clés générées -> OpenBao (une seule fois)
+│           ├── s3-credentials.yaml    # ExternalSecret : OpenBao -> Secret Kubernetes (une seule fois)
 │           ├── s3-pushsecret.yaml     # PushSecret : Secret Kubernetes -> OpenBao
 │           ├── s3-temp-generator.yaml  # Generator Password : clé temporaire
 │           └── s3-temp-pushsecret.yaml # PushSecret : clé temporaire générée -> OpenBao (tempAccessKey)
@@ -355,12 +357,13 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/mlflow/values.
 
 **Clés S3 de MLflow : le Secret Kubernetes fait foi.** Elles sont destinées à être renouvelées depuis le cluster (rotation à venir), d'où ce circuit :
 
+0. **`s3/s3-bootstrap-generator.yaml`** + **`s3/s3-bootstrap-pushsecret.yaml`** — générateur ESO `Password` `mlflow-s3-key` (`accessKey` / `secretKey`, 40 caractères alphanumériques) et `PushSecret` `mlflow-s3-bootstrap-push` qui les écrit dans `secret/seaweedfs/s3`. Aucune clé `mlflow` ne passe entre des mains humaines. `updatePolicy: IfNotExists` : chaque propriété n'est écrite que si elle est absente, ce PushSecret n'écrase **jamais** des clés existantes. `refreshInterval: 0s` : un seul passage, à sa création. Si le chemin n'existe pas, ESO le crée avec la métadonnée `managed-by=external-secrets`, ce qui autorise les autres PushSecrets à y écrire.
 1. **`s3/s3-credentials.yaml`** — `ExternalSecret` `mlflow-s3-credentials`, `refreshPolicy: CreatedOnce` : crée **une seule fois** le Secret `mlflow-s3-credentials` (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) depuis OpenBao `secret/seaweedfs/s3`, puis ne le modifie plus. `creationPolicy: Orphan` : le Secret survit à la suppression de l'`ExternalSecret`.
 2. **`s3/s3-pushsecret.yaml`** — `PushSecret` `mlflow-s3-credentials-push` : renvoie ce Secret vers `secret/seaweedfs/s3` (`accessKey` / `secretKey`), les **mêmes** emplacements qu'à l'étape 1. `deletionPolicy: None` : supprimer le PushSecret ne supprime rien dans OpenBao.
 3. SeaweedFS lit `secret/seaweedfs/s3` pour son identité `mlflow` (`workloads/seaweedfs/s3-credentials.yaml`).
 4. **`s3/s3-temp-generator.yaml`** + **`s3/s3-temp-pushsecret.yaml`** — générateur ESO `Password` `mlflow-s3-temp-key` (20 caractères alphanumériques) et `PushSecret` `mlflow-s3-temp-push` qui écrit sa valeur directement dans `secret/seaweedfs/s3`, propriété **`tempAccessKey`**, à côté des clés actives sans les écraser. Aucun Secret Kubernetes intermédiaire : la clé temporaire n'existe que dans OpenBao. Le générateur produit une nouvelle valeur à chaque push et `updatePolicy: Replace` l'écrit : **chaque déclenchement du PushSecret remplace `tempAccessKey` par une nouvelle clé**, sans interaction directe avec OpenBao.
 
-**Les deux PushSecrets sont déclenchés à la demande** (`refreshInterval: 0s`) : ils poussent à leur création, puis seulement quand l'objet PushSecret change (spec, labels ou annotations). Une modification du Secret source ne déclenche **rien** : ESO ne surveille pas les Secrets sources. Ils ne servent qu'à la rotation, qui les déclenche en changeant une annotation :
+**Les PushSecrets de rotation (`mlflow-s3-credentials-push`, `mlflow-s3-temp-push`) sont déclenchés à la demande** (`refreshInterval: 0s`) : ils poussent à leur création, puis seulement quand l'objet PushSecret change (spec, labels ou annotations). Une modification du Secret source ne déclenche **rien** : ESO ne surveille pas les Secrets sources. Ils ne servent qu'à la rotation, qui les déclenche en changeant une annotation :
 
 ```bash
 kubectl -n mlflow annotate pushsecret mlflow-s3-credentials-push force-sync=$(date +%s) --overwrite
@@ -371,7 +374,7 @@ Cette annotation n'étant pas dans Git, ArgoCD ne la voit pas comme une dérive.
 
 Modifier le Secret `mlflow-s3-credentials` puis déclencher son PushSecret propage donc les clés à OpenBao, puis à SeaweedFS (rafraîchissement ≤ 1 h **et** redémarrage du pod SeaweedFS, qui ne lit sa config qu'au démarrage). Ne pas modifier `secret/seaweedfs/s3` directement dans OpenBao : le prochain déclenchement du PushSecret le réécrirait avec la valeur du Secret.
 
-> ESO refuse d'écrire dans un secret OpenBao qu'il n'a pas créé (`secret not managed by external-secrets`). `secret/seaweedfs/s3` étant créé à la main, il faut lui ajouter la métadonnée `managed-by=external-secrets` (voir [Prérequis manuels](#prérequis-manuels-secrets)).
+> ESO refuse d'écrire dans un secret OpenBao qu'il n'a pas créé (`secret not managed by external-secrets`) : il vérifie la métadonnée `managed-by=external-secrets`, qu'il pose lui-même quand il crée le chemin. Ne pas créer `secret/seaweedfs/s3` à la main, sinon tous les PushSecrets échouent. Si c'est déjà fait : `bao kv metadata put -custom-metadata=managed-by=external-secrets secret/seaweedfs/s3`. Cette métadonnée ne peut pas être posée depuis un PushSecret : le provider Vault ignore les labels du template et les `metadata` des entrées.
 
 > Le chart crée un Secret `mlflow-flask-server-secret-key` aléatoire en hook `pre-install` (→ PreSync sous ArgoCD, recréé à chaque sync puisque `lookup` ne fonctionne pas). Sans authentification MLflow, cette clé n'a pas d'effet utile ; elle ne provoque pas d'OutOfSync.
 
@@ -471,21 +474,14 @@ kubectl -n external-secrets create secret generic vault-token \
 
 ### 5. Identifiants S3 de SeaweedFS
 
+Seule l'identité `admin` (tous les droits) est créée à la main :
+
 ```bash
-# identité admin (tous les droits)
 kubectl -n openbao exec openbao-0 -- sh -c \
   'BAO_TOKEN=<root-token> bao kv put secret/seaweedfs/admin accessKey=<access-key> secretKey=<secret-key>'
-# identité mlflow (bucket mlflow uniquement), aussi utilisée par MLflow
-kubectl -n openbao exec openbao-0 -- sh -c \
-  'BAO_TOKEN=<root-token> bao kv put secret/seaweedfs/s3 accessKey=<access-key> secretKey=<secret-key>'
 ```
 
-Autoriser le `PushSecret` de MLflow à réécrire `secret/seaweedfs/s3` (ESO n'écrit que dans les secrets marqués comme gérés par lui) :
-
-```bash
-kubectl -n openbao exec openbao-0 -- sh -c \
-  'BAO_TOKEN=<root-token> bao kv metadata put -custom-metadata=managed-by=external-secrets secret/seaweedfs/s3'
-```
+Les clés de l'identité `mlflow` (`secret/seaweedfs/s3`) sont **générées par ESO** à la synchronisation de l'Application `mlflow` (`mlflow-s3-bootstrap-push`). Ne **pas** créer ce chemin à la main, sinon ESO refuse d'y écrire (voir [MLflow](#appsplatformmlflowapplicationyaml)). D'ici là, l'`ExternalSecret` de SeaweedFS (wave `2`) est en erreur et réessaie : c'est normal, `mlflow` est en wave `3`.
 
 ESO crée alors le Secret `seaweedfs-s3-config` et le pod SeaweedFS démarre. Les clés `mlflow` sont aussi utilisées par MLflow : après l'amorçage, c'est le Secret Kubernetes `mlflow-s3-credentials` qui fait foi (voir [MLflow](#appsplatformmlflowapplicationyaml)). La config S3 de SeaweedFS n'est lue qu'au démarrage : après un changement de clés, `kubectl -n seaweedfs rollout restart deploy/seaweedfs-all-in-one`.
 
