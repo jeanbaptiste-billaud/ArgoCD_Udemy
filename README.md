@@ -141,7 +141,8 @@ ArgoCD_Udemy/
 │       └── values.yaml
 ├── workloads/                         # manifests "bruts" référencés par des Applications
 │   ├── eso-config/
-│   │   └── cluster-secret-store.yaml  # ClusterSecretStore OpenBao
+│   │   ├── cluster-secret-store.yaml  # ClusterSecretStore OpenBao (KV v2 "secret")
+│   │   └── cluster-secret-store-database.yaml # ClusterSecretStore OpenBao (moteur "database")
 │   ├── seaweedfs/
 │   │   ├── s3-credentials.yaml        # ExternalSecret : config S3 de SeaweedFS depuis OpenBao
 │   │   └── s3-nodeport.yaml           # Service NodePort 30333 (S3 uniquement)
@@ -439,6 +440,12 @@ Application **`prometheus`** — chart OCI `kube-prometheus-stack` **92.3.1**, r
 - serveur `http://openbao.openbao.svc:8200` (DNS interne du cluster) ;
 - moteur KV **v2** monté sur `secret` ;
 - authentification par token, lu dans le Secret **`vault-token`** (clé `token`) du namespace `external-secrets` — **à créer à la main**, voir [Prérequis manuels](#prérequis-manuels-secrets).
+
+### `workloads/eso-config/cluster-secret-store-database.yaml`
+
+**`ClusterSecretStore` `openbao-database`** : même serveur et même token que `openbao-backend`, mais pointé sur le moteur **`database`** d'OpenBao (identifiants PostgreSQL générés et changés par OpenBao).
+- `path: database`, `version: v1` : ESO fait une lecture brute de `database/<key>`. Avec `v2`, il insérerait `data/` dans le chemin (spécifique au KV v2) et la lecture échouerait.
+- Exemple : `key: static-creds/mlflow-role` → `GET database/static-creds/mlflow-role` (`username`, `password`, `ttl`…).
 
 ### `roar-k8s-helm.yaml`
 
@@ -756,7 +763,7 @@ Ce repo est un **lab local**. Plusieurs choix sont inacceptables en production :
 | Point | Où | En production |
 |---|---|---|
 | OpenBao mono-instance, HTTP sans TLS, 1 seule clé d'unseal, unseal manuel | `manifests/openbao/values.yaml` | Mode HA (Raft), TLS, plusieurs clés (Shamir) ou auto-unseal |
-| ESO s'authentifie avec le token root | `workloads/eso-config/cluster-secret-store.yaml` + secret `vault-token` | Auth Kubernetes OpenBao + policy en lecture seule |
+| ESO s'authentifie avec le token root | `workloads/eso-config/cluster-secret-store*.yaml` + secret `vault-token` | Auth Kubernetes OpenBao + policy en lecture seule |
 | Mot de passe Grafana `admin` en clair dans Git | `apps/platform/prometheus/application.yaml` | Secret externe (ESO) via `grafana.admin.existingSecret` |
 | ArgoCD en HTTP (`server.insecure: true`) | `manifests/argocd/values.yaml` + `argocd-values.yaml` (branche `bootstrap`) | TLS via Ingress |
 | Services en NodePort | plusieurs | Ingress + authentification |
