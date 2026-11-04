@@ -368,7 +368,7 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/mlflow/values.
 - Pas d'authentification MLflow (`auth.enabled: false`).
 
 `workloads/mlflow/` contient :
-- **`postgres-credentials.yaml`** — `ExternalSecret` `mlflow-postgres-credentials` : `username` / `password` lus dans OpenBao `secret/mlflow/postgres` (les mêmes que ceux du Job `db-mlflow`) ;
+- **`postgres-credentials.yaml`** — `ExternalSecret` `mlflow-postgres-credentials` : `username` / `password` du static role `mlflow-role`, lus via le store `openbao-database` (`database/static-creds/mlflow-role`). Rafraîchi toutes les 5 min pour suivre les rotations d'OpenBao (toutes les 24 h). ⚠️ MLflow lit ces identifiants en variables d'environnement, **au démarrage seulement** : après une rotation, ses nouvelles connexions échouent jusqu'au redémarrage du pod (`kubectl -n mlflow rollout restart deploy/mlflow`) ;
 - **`nodeport.yaml`** — `Service` `mlflow-nodeport` (NodePort 30500) ;
 - **`s3/`** — clés S3 de l'identité `mlflow` de SeaweedFS (voir ci-dessous).
 
