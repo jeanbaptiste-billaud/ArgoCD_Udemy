@@ -152,8 +152,7 @@ ArgoCD_Udemy/
 │   │   ├── statefulset.yaml           # serveur PostgreSQL
 │   │   └── databases/                 # 1 dossier par application qui a besoin d'une base
 │   │       └── mlflow/
-│   │           ├── credentials.yaml   # ExternalSecret du rôle "mlflow"
-│   │           └── create-db-job.yaml # Job : rôle et base "mlflow"
+│   │           └── create-db-job.yaml # Job : rôle et base "mlflow" (mot de passe géré par OpenBao)
 │   └── mlflow/
 │       ├── postgres-credentials.yaml  # ExternalSecret : accès à la base mlflow
 │       ├── nodeport.yaml              # Service NodePort 30500
@@ -347,14 +346,13 @@ Application **`postgres`** (sync-wave `2`) — déploie `workloads/postgres/` **
 
 ### `workloads/postgres/databases/<appli>/`
 
-**Un dossier par application qui a besoin d'une base**, avec deux fichiers :
+**Un dossier par application qui a besoin d'une base**, avec un fichier :
 
-- **`credentials.yaml`** — `ExternalSecret` `db-<appli>` (namespace `postgres`) : identifiants de l'appli lus dans OpenBao `secret/<appli>/postgres` ;
-- **`create-db-job.yaml`** — `Job` `db-<appli>`, hook ArgoCD **`PostSync`** : se connecte en superutilisateur et, de façon idempotente, crée le rôle s'il n'existe pas, **(ré)applique son mot de passe**, crée la base `<appli>` si elle n'existe pas et en donne la propriété au rôle.
+- **`create-db-job.yaml`** — `Job` `db-<appli>`, hook ArgoCD **`PostSync`** : se connecte en superutilisateur et, de façon idempotente, crée le rôle s'il n'existe pas (**sans mot de passe**), le délègue au rôle `openbao` (`GRANT <appli> TO openbao WITH ADMIN OPTION`), crée la base `<appli>` si elle n'existe pas et en donne la propriété au rôle.
 
-Le Job est rejoué à **chaque sync** de l'Application `postgres` (`BeforeHookCreation`) : pour propager un changement de mot de passe fait dans OpenBao, il suffit de resynchroniser `postgres` (après le rafraîchissement de l'ExternalSecret, ≤ 1 h, ou forcé — voir [Ajouter une base](#ajouter-une-base-postgresql)).
+**Le mot de passe appartient à OpenBao** : le moteur `database` gère le rôle via un **static role** `<appli>-role` (nom d'utilisateur fixe, mot de passe changé par OpenBao toutes les `rotation_period`). Le Job n'y touche jamais : s'il réappliquait un mot de passe à chaque sync, il écraserait celui d'OpenBao. Le nom d'utilisateur fixe garde aussi la propriété des tables créées par l'appli (avec des utilisateurs dynamiques, chaque migration créerait des tables appartenant à un utilisateur jetable).
 
-L'application cliente lit les **mêmes** identifiants OpenBao via son propre `ExternalSecret`, dans son namespace (ex. `workloads/mlflow/postgres-credentials.yaml`), et se connecte à `postgres.postgres.svc:5432`.
+L'application cliente lit les identifiants via un `ExternalSecret` sur le store `openbao-database` (`static-creds/<appli>-role`), dans son namespace (ex. `workloads/mlflow/postgres-credentials.yaml`), et se connecte à `postgres.postgres.svc:5432`.
 
 ### `apps/platform/mlflow/application.yaml`
 
@@ -544,14 +542,33 @@ kubectl -n openbao exec openbao-0 -- sh -c \
   'BAO_TOKEN=<root-token> bao kv put secret/postgres/admin username=postgres password=<mot-de-passe>'
 ```
 
-### 7. Identifiants de la base MLflow
+### 7. Moteur `database` d'OpenBao (identifiants de la base MLflow)
+
+Le mot de passe du rôle PostgreSQL `mlflow` est géré par OpenBao. À faire **après** le premier sync de `postgres` (le Job `db-mlflow` doit avoir créé le rôle `mlflow`).
+
+Rôle PostgreSQL utilisé par OpenBao, capable de changer le mot de passe des rôles applicatifs :
 
 ```bash
-kubectl -n openbao exec openbao-0 -- sh -c \
-  'BAO_TOKEN=<root-token> bao kv put secret/mlflow/postgres username=mlflow password=<mot-de-passe>'
+kubectl -n postgres exec postgres-0 -- psql -U admin -d postgres -c \
+  "CREATE ROLE openbao LOGIN CREATEROLE PASSWORD '<mot-de-passe-openbao>'; GRANT mlflow TO openbao WITH ADMIN OPTION;"
 ```
 
-Le Job `db-mlflow` crée alors le rôle et la base `mlflow` ; MLflow s'y connecte avec les mêmes identifiants.
+Moteur, connexion et static role :
+
+```bash
+kubectl -n openbao exec openbao-0 -- sh -c 'export BAO_TOKEN=<root-token>
+  bao secrets enable database
+  bao write database/config/my-postgresql-database \
+    plugin_name=postgresql-database-plugin \
+    connection_url="postgresql://{{username}}:{{password}}@postgres.postgres.svc.cluster.local:5432/postgres?sslmode=disable" \
+    username=openbao password=<mot-de-passe-openbao> \
+    password_authentication=scram-sha-256 \
+    allowed_roles="*-role"
+  bao write database/static-roles/mlflow-role \
+    db_name=my-postgresql-database username=mlflow rotation_period=24h'
+```
+
+À la création du static role, OpenBao change aussitôt le mot de passe de `mlflow` ; MLflow le lit via `static-creds/mlflow-role`.
 
 Les données sont persistées sur le PVC : elles survivent aux redémarrages (il suffit de refaire l'unseal).
 
@@ -650,23 +667,18 @@ Changer `targetRevision` (chart) dans `apps/platform/argocd/application.yaml` su
 
 Pour une nouvelle application `<appli>` :
 
-1. Créer ses identifiants dans OpenBao :
+1. Copier le dossier `workloads/postgres/databases/mlflow/` en `workloads/postgres/databases/<appli>/` et remplacer `mlflow` par `<appli>` (nom du Job, `DB_NAME`, `DB_USER`).
+2. Commit + push : l'Application `postgres` se synchronise et le Job crée le rôle (sans mot de passe) et la base.
+3. Créer le static role dans OpenBao (la connexion `my-postgresql-database` accepte tout rôle `*-role`) :
    ```bash
    kubectl -n openbao exec openbao-0 -- sh -c \
-     'BAO_TOKEN=<root-token> bao kv put secret/<appli>/postgres username=<appli> password=<mot-de-passe>'
+     'BAO_TOKEN=<root-token> bao write database/static-roles/<appli>-role db_name=my-postgresql-database username=<appli> rotation_period=24h'
    ```
-2. Copier le dossier `workloads/postgres/databases/mlflow/` en `workloads/postgres/databases/<appli>/` et remplacer `mlflow` par `<appli>` dans les deux fichiers (noms, `DB_NAME`, chemin OpenBao).
-3. Dans les manifests de l'appli, ajouter un `ExternalSecret` sur `secret/<appli>/postgres` dans **son** namespace, et la faire pointer vers `postgres.postgres.svc:5432`, base `<appli>`.
-4. Commit + push : l'Application `postgres` se synchronise et le Job crée le rôle et la base.
+4. Dans les manifests de l'appli, ajouter un `ExternalSecret` sur le store `openbao-database`, clé `static-creds/<appli>-role`, dans **son** namespace, et la faire pointer vers `postgres.postgres.svc:5432`, base `<appli>`.
 
-Retirer le dossier ne supprime **pas** la base (le Job ne fait que créer) : faire un `DROP DATABASE` / `DROP ROLE` à la main si besoin.
+Retirer le dossier ne supprime **pas** la base (le Job ne fait que créer) : supprimer le static role (`bao delete database/static-roles/<appli>-role`), puis faire un `DROP DATABASE` / `DROP ROLE` à la main si besoin.
 
-Pour rejouer les Jobs (ex. après un changement de mot de passe dans OpenBao) :
-
-```bash
-kubectl -n postgres annotate externalsecret db-<appli> force-sync=$(date +%s) --overwrite   # relit OpenBao
-argocd app sync postgres                                                                   # rejoue les Jobs
-```
+Pour forcer un changement de mot de passe : `bao write -f database/rotate-role/<appli>-role`.
 
 ### Utiliser MLflow
 
