@@ -71,11 +71,10 @@ class Predict:
         # Ecritures hors du chemin de la requete : une base lente ou coupee ne retarde pas
         # les predictions
         self.db_writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db-log")
+        # Table creee a la premiere ecriture, pas au demarrage : l'API demarre meme base coupee
+        self.table_ready = False
         logger.info("modele %s, environnement %s, journalisation %s",
                     self.model_label, self.environment, "PostgreSQL" if self.db_enabled else "desactivee")
-        if self.db_enabled:
-            with psycopg.connect(autocommit=True, connect_timeout=5) as conn:
-                conn.execute(CREATE_TABLE)
 
     @bentoml.api
     def predict(self, houses: list[House]) -> list[Prediction]:
@@ -90,11 +89,14 @@ class Predict:
         """Dernieres predictions journalisees (vide si la journalisation est desactivee)."""
         if not self.db_enabled:
             return []
-        with psycopg.connect(connect_timeout=5) as conn:
-            rows = conn.execute(
-                "SELECT created_at, model, features, price FROM predictions ORDER BY id DESC LIMIT %s",
-                (min(limit, 100),),
-            ).fetchall()
+        try:
+            with psycopg.connect(connect_timeout=5) as conn:
+                rows = conn.execute(
+                    "SELECT created_at, model, features, price FROM predictions ORDER BY id DESC LIMIT %s",
+                    (min(limit, 100),),
+                ).fetchall()
+        except psycopg.errors.UndefinedTable:  # aucune prediction journalisee pour l'instant
+            return []
         return [Logged(created_at=r[0], model=r[1], features=r[2], price=r[3]) for r in rows]
 
     @bentoml.api
@@ -105,6 +107,9 @@ class Predict:
         """Journalisation au mieux : une erreur est loguee, la prediction est deja rendue."""
         try:
             with psycopg.connect(autocommit=True, connect_timeout=3) as conn:
+                if not self.table_ready:
+                    conn.execute(CREATE_TABLE)
+                    self.table_ready = True
                 conn.cursor().executemany(
                     "INSERT INTO predictions (model, features, price) VALUES (%s, %s, %s)",
                     [(self.model_label, psycopg.types.json.Jsonb(f), p) for f, p in zip(features, prices)],

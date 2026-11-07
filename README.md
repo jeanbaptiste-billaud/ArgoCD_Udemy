@@ -61,7 +61,7 @@ Dev et recette exécutent donc des modèles différents tant qu'une version n'a 
 | `GET /livez`, `GET /readyz` | | sondes Kubernetes |
 
 - **Le modèle est dans l'image** : l'API ne dépend pas de MLflow à l'exécution.
-- **Journalisation PostgreSQL** si `PGHOST` est défini (variables libpq `PGHOST`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`) : table `predictions` créée au démarrage. Les écritures passent par un thread dédié : une base lente ou coupée ne retarde pas les prédictions, l'erreur est seulement loguée.
+- **Journalisation PostgreSQL** si `PGHOST` est défini (variables libpq `PGHOST`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`) : table `predictions` créée à la première écriture, pas au démarrage (l'API démarre même base coupée). Les écritures passent par un thread dédié : une base lente ou coupée ne retarde pas les prédictions, l'erreur est seulement loguée.
 - `ENVIRONMENT` : nom de l'environnement, renvoyé par `/info`.
 
 ```bash
