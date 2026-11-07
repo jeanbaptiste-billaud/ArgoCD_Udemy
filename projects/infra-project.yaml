@@ -14,6 +14,7 @@ spec:
     - https://openbao.github.io/openbao-helm
     - https://seaweedfs.github.io/seaweedfs/helm
     - https://community-charts.github.io/helm-charts
+    - https://stakater.github.io/stakater-charts
     - ghcr.io/prometheus-community/charts
   # Un namespace par application
   destinations:
@@ -29,6 +30,8 @@ spec:
       namespace: postgres          # PostgreSQL partage
     - server: https://kubernetes.default.svc
       namespace: mlflow            # MLflow
+    - server: https://kubernetes.default.svc
+      namespace: reloader          # Reloader (redemarrage sur changement de Secret)
     - server: https://kubernetes.default.svc
       namespace: monitoring        # kube-prometheus-stack
     - server: https://kubernetes.default.svc

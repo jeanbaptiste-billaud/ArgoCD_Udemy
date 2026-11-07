@@ -1,0 +1,36 @@
+# Reloader (stakater) : redemarre un Deployment/StatefulSet quand un Secret ou une ConfigMap
+# qu'il utilise change (ex. rotation par OpenBao -> ExternalSecret -> Secret mis a jour).
+# Opt-in : seuls les workloads annotes sont concernes (autoReloadAll: false), par ex.
+#   secret.reloader.stakater.com/reload: "<secret>[,<secret>...]"
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: reloader
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: infra
+  source:
+    repoURL: https://stakater.github.io/stakater-charts
+    chart: reloader
+    targetRevision: 2.2.19
+    helm:
+      valuesObject:
+        reloader:
+          # Redemarrage par annotation du template de pod (comme kubectl rollout restart)
+          # plutot que par variable d'environnement ajoutee aux conteneurs : un champ que
+          # ArgoCD ne gere pas, donc pas de derive ni de retour en arriere par selfHeal.
+          reloadStrategy: annotations
+          readOnlyRootFileSystem: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: reloader
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

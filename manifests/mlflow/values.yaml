@@ -39,6 +39,13 @@ extraEnvVars:
 serverAllowedHosts:
   - "*"
 
+# Reloader redemarre MLflow quand OpenBao change le mot de passe Postgres (static role) et
+# qu'ESO met a jour le Secret : MLflow ne lit ses identifiants qu'au demarrage.
+# PAS mlflow-s3-credentials : le job de rotation S3 redemarre MLflow lui-meme, au bon moment
+# (avant la revocation de l'ancienne paire) ; Reloader le ferait en double, plus tot.
+deploymentAnnotations:
+  secret.reloader.stakater.com/reload: "mlflow-postgres-credentials"
+
 # Service ClusterIP du chart (le chart ne permet pas de fixer un nodePort) :
 # l'acces externe passe par le Service NodePort de workloads/mlflow.
 service:

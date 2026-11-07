@@ -62,6 +62,7 @@ flowchart TD
     ROOT --> SWFS[Application<br/>seaweedfs]
     ROOT --> PG[Application<br/>postgres]
     ROOT --> MLF[Application<br/>mlflow]
+    ROOT --> RLD[Application<br/>reloader]
     ROOT -. exclu .-> PROM[Application<br/>prometheus]
 
     ARGO -->|chart argo-cd + values| ARGOCD[(ArgoCD)]
@@ -73,6 +74,8 @@ flowchart TD
     MLF -->|chart mlflow + workloads/mlflow| MLFD[(MLflow)]
     MLFD -->|base mlflow| PGD
     MLFD -->|artefacts s3://mlflow| SWFSD
+    RLD -->|chart reloader| RLDD[(Reloader)]
+    RLDD -.->|redémarre sur rotation du Secret Postgres| MLFD
     PROM -.->|chart kube-prometheus-stack| PROMD[(Monitoring)]
 
     CSS -->|lit les secrets| BAOD
@@ -128,6 +131,8 @@ ArgoCD_Udemy/
 │       │   └── application.yaml       # PostgreSQL partagé (serveur + une base par appli)
 │       ├── mlflow/
 │       │   └── application.yaml       # MLflow (chart Helm + manifests)
+│       ├── reloader/
+│       │   └── application.yaml       # Reloader : redémarre les applis quand leurs Secrets changent
 │       └── prometheus/
 │           └── application.yaml       # kube-prometheus-stack — EXCLU de root
 ├── manifests/                         # values Helm référencées par des Applications ($values)
@@ -229,8 +234,9 @@ AppProject **`infra`**, utilisé par toutes les Applications plateforme. Il déf
   - `https://openbao.github.io/openbao-helm` (chart OpenBao) ;
   - `https://seaweedfs.github.io/seaweedfs/helm` (chart SeaweedFS) ;
   - `https://community-charts.github.io/helm-charts` (chart MLflow) ;
+  - `https://stakater.github.io/stakater-charts` (chart Reloader) ;
   - `ghcr.io/prometheus-community/charts` (chart OCI kube-prometheus-stack).
-- **`destinations`** — où elles peuvent déployer : `argocd`, `external-secrets`, `openbao`, `seaweedfs`, `postgres`, `mlflow`, `monitoring`, `kube-system` (certains charts y posent des composants, ex. Services de kubelet pour Prometheus).
+- **`destinations`** — où elles peuvent déployer : `argocd`, `external-secrets`, `openbao`, `seaweedfs`, `postgres`, `mlflow`, `reloader`, `monitoring`, `kube-system` (certains charts y posent des composants, ex. Services de kubelet pour Prometheus).
 - **`clusterResourceWhitelist: */*`** — autorise les ressources cluster-scoped (CRDs, ClusterRoles, webhooks…), nécessaires aux opérateurs.
 - Annotation `Delete=false` : l'AppProject n'est jamais supprimé en cascade, même si `root-projects` l'est.
 
@@ -368,7 +374,7 @@ Trois sources : le chart, ce repo (`ref: values`) pour `manifests/mlflow/values.
 - Pas d'authentification MLflow (`auth.enabled: false`).
 
 `workloads/mlflow/` contient :
-- **`postgres-credentials.yaml`** — `ExternalSecret` `mlflow-postgres-credentials` : `username` / `password` du static role `mlflow-role`, lus via le store `openbao-database` (`database/static-creds/mlflow-role`). Rafraîchi toutes les 5 min pour suivre les rotations d'OpenBao (toutes les 24 h). ⚠️ MLflow lit ces identifiants en variables d'environnement, **au démarrage seulement** : après une rotation, ses nouvelles connexions échouent jusqu'au redémarrage du pod (`kubectl -n mlflow rollout restart deploy/mlflow`) ;
+- **`postgres-credentials.yaml`** — `ExternalSecret` `mlflow-postgres-credentials` : `username` / `password` du static role `mlflow-role`, lus via le store `openbao-database` (`database/static-creds/mlflow-role`). Rafraîchi toutes les 5 min pour suivre les rotations d'OpenBao (toutes les 24 h). MLflow lit ces identifiants en variables d'environnement, **au démarrage seulement** : l'annotation `secret.reloader.stakater.com/reload: mlflow-postgres-credentials` (`deploymentAnnotations` des values) fait redémarrer le pod par [Reloader](#appsplatformreloaderapplicationyaml) dès que le Secret change. Entre la rotation et le rafraîchissement du Secret (≤ 5 min), les nouvelles connexions de MLflow échouent ;
 - **`nodeport.yaml`** — `Service` `mlflow-nodeport` (NodePort 30500) ;
 - **`s3/`** — clés S3 de l'identité `mlflow` de SeaweedFS (voir ci-dessous).
 
@@ -421,6 +427,37 @@ Modifier le Secret `mlflow-s3-credentials` puis déclencher son PushSecret propa
 > ESO refuse d'écrire dans un secret OpenBao qu'il n'a pas créé (`secret not managed by external-secrets`) : il vérifie la métadonnée `managed-by=external-secrets`, qu'il pose lui-même quand il crée le chemin. Ne pas créer `secret/seaweedfs/s3` à la main, sinon tous les PushSecrets échouent. Si c'est déjà fait : `bao kv metadata put -custom-metadata=managed-by=external-secrets secret/seaweedfs/s3`. Cette métadonnée ne peut pas être posée depuis un PushSecret : le provider Vault ignore les labels du template et les `metadata` des entrées.
 
 > Le chart crée un Secret `mlflow-flask-server-secret-key` aléatoire en hook `pre-install` (→ PreSync sous ArgoCD, recréé à chaque sync puisque `lookup` ne fonctionne pas). Sans authentification MLflow, cette clé n'a pas d'effet utile ; elle ne provoque pas d'OutOfSync.
+
+### `apps/platform/reloader/application.yaml`
+
+Application **`reloader`** (sync-wave `0`) — chart `reloader` **2.2.19** de Stakater (Reloader v1.4.23) dans `reloader`.
+
+Reloader surveille les Secrets et ConfigMaps du cluster et fait un *rollout restart* des Deployments / StatefulSets / DaemonSets qui les utilisent quand leur contenu change. Il complète ESO : ESO met le Secret à jour, Reloader fait relire la nouvelle valeur aux applis qui ne la chargent qu'au démarrage (variables d'environnement).
+
+- **Opt-in** (`autoReloadAll: false`, défaut du chart) : seuls les workloads annotés sont redémarrés. On nomme les Secrets surveillés plutôt que `reloader.stakater.com/auto: "true"`, pour ne pas redémarrer sur un Secret dont l'appli gère elle-même le changement :
+  ```yaml
+  secret.reloader.stakater.com/reload: "secret-a,secret-b"
+  ```
+- **`reloadStrategy: annotations`** : Reloader modifie une annotation du template de pod (comme `kubectl rollout restart`) au lieu d'ajouter une variable d'environnement aux conteneurs. ArgoCD ne gère pas ce champ : pas de dérive, et `selfHeal` n'annule pas le redémarrage.
+- Pas de redémarrage si ESO réécrit un Secret sans en changer les valeurs (Reloader compare un hash du contenu).
+- `readOnlyRootFileSystem: true`.
+
+Workloads concernés :
+
+| Workload | Secret surveillé | Pourquoi |
+|---|---|---|
+| `mlflow` (Deployment) | `mlflow-postgres-credentials` | Mot de passe Postgres changé par OpenBao toutes les 24 h, lu au démarrage |
+
+Volontairement **non annotés** :
+
+- `mlflow` / `mlflow-s3-credentials` : le [job de rotation S3](#appsplatformmlflowapplicationyaml) redémarre MLflow lui-même, à l'étape 7, **avant** de révoquer l'ancienne paire. Reloader le redémarrerait en plus, dès l'étape 5 ;
+- SeaweedFS / `seaweedfs-s3-config` : rechargé sans coupure par `SIGHUP` ; un redémarrage couperait S3 (un seul pod) ;
+- PostgreSQL / `postgres-admin` : le mot de passe n'est lu qu'à l'initialisation du volume, un redémarrage n'y changerait rien.
+
+```bash
+# Redémarrages effectués par Reloader
+kubectl -n reloader logs deploy/reloader-reloader | grep -i reload
+```
 
 ### `apps/platform/prometheus/application.yaml`
 
@@ -618,7 +655,7 @@ L'annotation `argocd.argoproj.io/sync-wave` ordonne la création des objets **au
 |---|---|---|---|
 | `-1` | `root-projects` | `root` | L'AppProject `infra` doit exister avant les apps qui l'utilisent |
 | `-1` | `argocd` | `root` | ArgoCD avant le reste |
-| `0` | `external-secrets-operator`, `openbao` | `root` | Composants indépendants |
+| `0` | `external-secrets-operator`, `openbao`, `reloader` | `root` | Composants indépendants |
 | `1` | `eso-config` | `root` | A besoin des CRDs installées par l'opérateur ESO |
 | `2` | `seaweedfs`, `postgres` | `root` | Ont besoin du `ClusterSecretStore` créé par `eso-config` |
 | `3` | `mlflow` | `root` | A besoin de PostgreSQL et de SeaweedFS (bucket `mlflow`) |
