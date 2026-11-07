@@ -2,9 +2,9 @@
 # BOOTSTRAP — seul manifest applique a la main, une seule fois :
 #   kubectl apply -f root-app.yaml
 #
-# Cree l'Application racine "root" qui synchronise main:apps/
+# Cree l'Application racine "root" qui synchronise infra:apps/
 # (pattern app-of-apps). Tout le reste (AppProjects via root-projects,
-# ArgoCD lui-meme, composants plateforme) est defini sur la branche main.
+# ArgoCD lui-meme, composants plateforme) est defini sur la branche infra.
 #
 # Ce fichier n'est PAS surveille par ArgoCD : pour modifier "root",
 # editer ce fichier puis refaire le kubectl apply.
@@ -18,16 +18,16 @@ metadata:
     - resources-finalizer.argocd.argoproj.io
 spec:
   # Projet "default" : l'AppProject "infra" n'existe pas encore,
-  # il est cree par l'Application root-projects (definie dans main:apps/).
+  # il est cree par l'Application root-projects (definie dans infra:apps/).
   project: default
   source:
     repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
-    targetRevision: main
+    targetRevision: infra
     path: apps
     directory:
       recurse: true
       # Prometheus n'est pas deploye automatiquement : appliquer a la main
-      #   kubectl apply -f apps/platform/prometheus/application.yaml  (branche main)
+      #   kubectl apply -f apps/platform/prometheus/application.yaml  (branche infra)
       exclude: 'platform/prometheus/*'
   destination:
     server: https://kubernetes.default.svc

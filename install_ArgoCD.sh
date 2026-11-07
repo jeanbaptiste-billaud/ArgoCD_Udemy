@@ -15,7 +15,7 @@ helm install argocd argo/argo-cd \
   --create-namespace \
   --version 10.1.3 \
   -f argocd-values.yaml
-# Values minimales : l'Application "argocd" (main:apps/platform/argocd)
+# Values minimales : l'Application "argocd" (infra:apps/platform/argocd)
 # reprend ensuite la release avec les values completes.
 
 kubectl -n argocd rollout status deploy/argocd-server --timeout=300s
@@ -43,7 +43,7 @@ argocd login $NODE_IP:30080 \
   --insecure \
   --grpc-web
 
-# ------ Bootstrap GitOps : Application racine "root" -> main:apps/ ------
+# ------ Bootstrap GitOps : Application racine "root" -> infra:apps/ ------
 kubectl apply -f root-app.yaml
 
 # ------ Vérification finale ------
