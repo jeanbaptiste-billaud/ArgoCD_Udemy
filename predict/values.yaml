@@ -1,0 +1,34 @@
+# Valeurs communes a tous les environnements. Chaque environnement surcharge le strict
+# necessaire dans values-<env>.yaml (fichier passe par son Application ArgoCD).
+
+# Partage par les sous-charts (.Values.global)
+global:
+  environment: ""                  # obligatoire : dev, recette...
+
+# Sous-chart api : le service BentoML
+api:
+  image:
+    repository: ghcr.io/jeanbaptiste-billaud/predict
+    tag: ""                        # obligatoire : v<version MLflow>-<commit>, produit par bento-build
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []             # package GHCR public : inutile
+  replicaCount: 1
+  service:
+    nodePort: null                 # null : ClusterIP seulement
+  # Base de journalisation des predictions (serveur PostgreSQL partage de la plateforme).
+  # Identifiants : static role OpenBao, lus par un ExternalSecret et suivis par Reloader.
+  database:
+    enabled: true
+    host: postgres.postgres.svc
+    name: ""                       # obligatoire si enabled
+    staticRole: ""                 # obligatoire si enabled : <role>-role dans OpenBao
+  resources:
+    requests:
+      cpu: 100m
+      memory: 384Mi
+    limits:
+      memory: 1Gi
+
+# Sous-chart smoketest : Job PostSync qui verifie l'API apres chaque sync
+smoketest:
+  enabled: true

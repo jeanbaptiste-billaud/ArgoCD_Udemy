@@ -1,0 +1,15 @@
+# Environnement recette (Application "recette", namespace recette).
+# Promotion : reporter ici un tag DEJA deploye et valide en dev. L'image n'est pas
+# reconstruite : la recette execute exactement ce qui a tourne en dev.
+global:
+  environment: recette
+
+api:
+  image:
+    tag: ""                        # a renseigner a la premiere promotion
+  replicaCount: 2
+  service:
+    nodePort: 30802
+  database:
+    name: predict_recette
+    staticRole: predict-recette-role

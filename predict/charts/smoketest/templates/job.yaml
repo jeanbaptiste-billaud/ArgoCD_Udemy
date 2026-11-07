@@ -1,0 +1,59 @@
+# Hook PostSync : ArgoCD le lance une fois toutes les ressources du sync saines (Deployment
+# deploye et pret). S'il echoue, le sync est en echec : un deploiement casse se voit dans l'UI.
+# Verifie que l'API repond, sert le bon environnement et produit une prediction.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: smoketest
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation   # garde le dernier pour ses logs
+  labels:
+    app.kubernetes.io/name: smoketest
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/part-of: predict
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100                 # curl_user de l'image (USER non numerique)
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: smoketest
+          image: {{ .Values.image }}
+          env:
+            - name: API
+              value: {{ .Values.apiUrl }}
+            - name: ENVIRONMENT
+              value: {{ required "global.environment est obligatoire" .Values.global.environment }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              post() { curl -fsS --retry 5 --retry-all-errors --retry-delay 3 -X POST "$API/$1" -H 'content-type: application/json' -d "$2"; }
+              info="$(post info '{}')"
+              echo "info : $info"
+              echo "$info" | grep -q "\"environment\": \"$ENVIRONMENT\"" \
+                || { echo "ECHEC : environnement attendu $ENVIRONMENT"; exit 1; }
+              prediction="$(post predict '{"houses":[{"MedInc":8.3,"HouseAge":41,"AveRooms":6.98,"AveBedrms":1.02,"Population":322,"AveOccup":2.56,"Latitude":37.88,"Longitude":-122.23}]}')"
+              echo "prediction : $prediction"
+              echo "$prediction" | grep -q '"price"' || { echo "ECHEC : pas de prix"; exit 1; }
+              echo "OK"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi

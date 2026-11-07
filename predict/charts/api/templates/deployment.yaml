@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.name }}
+  labels:
+    {{- include "api.labels" . | nindent 4 }}
+  {{- if .Values.database.enabled }}
+  annotations:
+    # L'API lit ses identifiants au demarrage seulement : redemarrage a chaque rotation
+    secret.reloader.stakater.com/reload: {{ include "api.dbSecret" . }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "api.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0              # l'ancien pod sert jusqu'a ce que le nouveau soit pret
+  template:
+    metadata:
+      labels:
+        {{- include "api.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        # Utilisateur "bentoml" de l'image : uid numerique obligatoire avec runAsNonRoot
+        # (l'image declare USER bentoml, que kubelet ne peut pas verifier)
+        runAsNonRoot: true
+        runAsUser: 1034
+        runAsGroup: 1034
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: "{{ .Values.image.repository }}:{{ required "api.image.tag est obligatoire (tag produit par le job bento-build)" .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+          env:
+            - name: ENVIRONMENT
+              value: {{ .Values.global.environment }}
+            - name: BENTOML_DO_NOT_TRACK
+              value: "true"
+            {{- if .Values.database.enabled }}
+            # Variables libpq lues par psycopg
+            - name: PGHOST
+              value: {{ .Values.database.host }}
+            - name: PGDATABASE
+              value: {{ required "api.database.name est obligatoire" .Values.database.name }}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "api.dbSecret" . }}
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "api.dbSecret" . }}
+                  key: password
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}

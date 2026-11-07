@@ -1,0 +1,13 @@
+# Environnement dev (Application "dev", namespace dev).
+# Le tag de l'image suit le dernier build : derniere version du modele @dev.
+global:
+  environment: dev
+
+api:
+  image:
+    tag: ""                        # a renseigner apres le premier build (ex. v2-1a2b3c4)
+  service:
+    nodePort: 30801
+  database:
+    name: predict_dev
+    staticRole: predict-dev-role

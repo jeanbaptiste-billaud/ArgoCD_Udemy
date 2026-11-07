@@ -1,0 +1,5 @@
+apiVersion: v2
+name: api
+description: Service BentoML predict (Deployment, Service, identifiants PostgreSQL)
+type: application
+version: 0.1.0

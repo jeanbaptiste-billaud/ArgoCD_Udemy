@@ -1,0 +1,3 @@
+# Valeurs par defaut du sous-chart ; surchargees par le chart umbrella (cle "smoketest").
+image: curlimages/curl:8.23.0
+apiUrl: http://predict:3000        # Service du sous-chart api, meme namespace

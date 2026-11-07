@@ -1,0 +1,16 @@
+# Chart umbrella de l'application predict : un chart par composant (charts/), une release
+# par environnement (Applications ArgoCD "dev" et "recette", dossier argocd/ de cette branche).
+apiVersion: v2
+name: predict
+description: API de prediction California housing (BentoML) et ses tests de fumee
+type: application
+version: 0.1.0
+dependencies:
+  # Sous-charts locaux (dossier charts/) : pas de depot Helm a declarer dans ArgoCD
+  - name: api
+    version: 0.1.0
+    repository: file://charts/api
+  - name: smoketest
+    version: 0.1.0
+    repository: file://charts/smoketest
+    condition: smoketest.enabled

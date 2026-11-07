@@ -1,0 +1,18 @@
+# Valeurs par defaut du sous-chart ; surchargees par le chart umbrella (cle "api").
+name: predict
+image:
+  repository: ghcr.io/jeanbaptiste-billaud/predict
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+replicaCount: 1
+service:
+  port: 3000                       # port de BentoML
+  nodePort: null
+database:
+  enabled: true
+  host: postgres.postgres.svc
+  name: ""
+  staticRole: ""
+  refreshInterval: 5m              # suit vite les rotations d'OpenBao
+resources: {}

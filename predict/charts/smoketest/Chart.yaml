@@ -1,0 +1,5 @@
+apiVersion: v2
+name: smoketest
+description: Test de fumee de l'API predict apres chaque sync ArgoCD (hook PostSync)
+type: application
+version: 0.1.0

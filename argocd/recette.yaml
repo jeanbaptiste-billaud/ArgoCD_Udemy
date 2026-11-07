@@ -1,0 +1,35 @@
+# Application "recette" : chart umbrella predict avec values-recette.yaml, dans le namespace recette.
+# Creee par l'Application "predict" (branche infra, apps/products/predict/).
+# Projet "predict" (branche infra, projects/) : seuls les namespaces dev et recette sont permis.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: recette
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: predict
+  source:
+    repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
+    targetRevision: helm
+    path: predict
+    helm:
+      releaseName: recette
+      valueFiles:
+        - values-recette.yaml            # values.yaml (commun) est toujours lu en premier
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: recette
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m
