@@ -9,6 +9,8 @@ Ce README décrit la branche **`infra`** (la plateforme). Les branches du repo s
 | **`bootstrap`** | Scripts d'installation (MicroK8s, ArgoCD) + `root-app.yaml` | Téléchargée une seule fois pour installer le cluster |
 | **`infra`** | Toutes les Applications plateforme et leur configuration | Seule source de vérité ensuite |
 | **`pyeso`** | Outils Python : package `pyESO` + scripts de rotation (`s3_rotation/`), projet uv | Clonée au démarrage par les CronJobs (voir son README) |
+| **`bento`** | Code de l'API predict : entraînement, service BentoML, préparation de l'image | Clonée par le job de build `bento-build` |
+| **`helm`** | Chart umbrella `predict` + Applications `dev` / `recette` | Synchronisée par l'Application `predict` |
 
 Une fois le bootstrap effectué, **Git est la seule source de vérité** : toute modification du cluster passe par un commit sur `infra`, qu'ArgoCD applique automatiquement. `infra` ne dépend jamais de la branche `bootstrap`.
 
@@ -22,6 +24,9 @@ Composants déployés :
 | **SeaweedFS** | Stockage objet compatible S3 (mode all-in-one), stockage d'artefacts pour MLflow | `seaweedfs` |
 | **PostgreSQL** | Serveur partagé : une base par application qui en a besoin (MLflow, …) | `postgres` |
 | **MLflow** | Suivi d'expériences et registre de modèles ; artefacts dans SeaweedFS | `mlflow` |
+| **Reloader** | Redémarre les applis annotées quand leurs Secrets changent | `reloader` |
+| **bento-build** | Construit les images de l'API predict (BentoML + BuildKit) et les pousse sur GHCR | `bento-build` |
+| **predict** | API de prédiction (projet applicatif, branche `helm`) : environnements dev et recette | `dev`, `recette` |
 | **kube-prometheus-stack** | Prometheus, Grafana, Alertmanager — **déploiement manuel** (voir plus bas) | `monitoring` |
 
 ---
@@ -63,6 +68,8 @@ flowchart TD
     ROOT --> PG[Application<br/>postgres]
     ROOT --> MLF[Application<br/>mlflow]
     ROOT --> RLD[Application<br/>reloader]
+    ROOT --> BB[Application<br/>bento-build]
+    ROOT --> PRED[Application<br/>predict]
     ROOT -. exclu .-> PROM[Application<br/>prometheus]
 
     ARGO -->|chart argo-cd + values| ARGOCD[(ArgoCD)]
@@ -77,6 +84,11 @@ flowchart TD
     RLD -->|chart reloader| RLDD[(Reloader)]
     RLDD -.->|redémarre sur rotation du Secret Postgres| MLFD
     PROM -.->|chart kube-prometheus-stack| PROMD[(Monitoring)]
+    BB -->|workloads/bento-build| BBD[(CronJob predict-build)]
+    BBD -->|modèle @dev| MLFD
+    PRED -->|helm:argocd/| APPS[Applications<br/>dev, recette]
+    APPS -->|chart umbrella helm:predict| PREDD[(API predict<br/>dev, recette)]
+    PREDD -->|bases predict_*| PGD
 
     CSS -->|lit les secrets| BAOD
     SWFSD -.->|identifiants S3 via ESO| CSS
@@ -86,7 +98,7 @@ Points clés :
 
 - **`root-app.yaml` (branche `bootstrap`) est le seul fichier appliqué à la main.** Il crée l'Application racine **`root`**, qui synchronise `infra:apps/`. Tout le reste en découle :
   - `root-projects` (définie dans `apps/root-projects/`) → synchronise `projects/` (les **AppProjects**) ;
-  - les autres fichiers de `apps/` → toutes les **Applications** plateforme.
+  - les autres fichiers de `apps/` → toutes les **Applications** plateforme, et le point d'entrée de chaque projet applicatif (`apps/products/`).
 - **`root` n'est pas surveillée par ArgoCD** : ajouter une app ne demande aucune action sur la branche `bootstrap`. On ne réapplique `root-app.yaml` que pour modifier `root` elle-même.
 - **ArgoCD se gère lui-même** : l'Application `argocd` reprend la release Helm installée par le script de bootstrap, avec les values de `manifests/argocd/values.yaml`.
 - Chaque composant est une **Application séparée** (une « tuile » dans l'UI ArgoCD), ce qui permet de les synchroniser, diagnostiquer ou supprimer indépendamment.
@@ -111,10 +123,14 @@ Branche **`infra`** :
 ArgoCD_Udemy/
 ├── README.md                          # ce fichier
 ├── projects/                          # AppProjects — synchronisé par root-projects
-│   └── infra-project.yaml             # AppProject "infra" (droits des apps plateforme)
+│   ├── infra-project.yaml             # AppProject "infra" (droits des apps plateforme)
+│   └── predict-project.yaml           # AppProject "predict" (namespaces dev et recette)
 ├── apps/                              # Applications ArgoCD — synchronisé par root (récursif)
 │   ├── root-projects/
 │   │   └── application.yaml           # synchronise projects/ (wave -1)
+│   ├── products/                      # points d'entrée des projets applicatifs
+│   │   └── predict/
+│   │       └── application.yaml       # synchronise helm:argocd/ (Applications dev, recette)
 │   └── platform/                      # composants d'infrastructure
 │       ├── argocd/
 │       │   └── application.yaml       # ArgoCD qui se gère lui-même
@@ -133,6 +149,8 @@ ArgoCD_Udemy/
 │       │   └── application.yaml       # MLflow (chart Helm + manifests)
 │       ├── reloader/
 │       │   └── application.yaml       # Reloader : redémarre les applis quand leurs Secrets changent
+│       ├── bento-build/
+│       │   └── application.yaml       # build des images de l'API predict (pointe vers workloads/bento-build)
 │       └── prometheus/
 │           └── application.yaml       # kube-prometheus-stack — EXCLU de root
 ├── manifests/                         # values Helm référencées par des Applications ($values)
@@ -156,8 +174,15 @@ ArgoCD_Udemy/
 │   │   ├── service.yaml               # Service postgres.postgres.svc:5432
 │   │   ├── statefulset.yaml           # serveur PostgreSQL
 │   │   └── databases/                 # 1 dossier par application qui a besoin d'une base
-│   │       └── mlflow/
-│   │           └── create-db-job.yaml # Job : rôle et base "mlflow" (mot de passe géré par OpenBao)
+│   │       ├── mlflow/
+│   │       │   └── create-db-job.yaml # Job : rôle et base "mlflow" (mot de passe géré par OpenBao)
+│   │       ├── predict-dev/
+│   │       │   └── create-db-job.yaml # Job : rôle et base "predict_dev"
+│   │       └── predict-recette/
+│   │           └── create-db-job.yaml # Job : rôle et base "predict_recette"
+│   ├── bento-build/
+│   │   ├── ghcr-credentials.yaml      # ExternalSecret : PAT GitHub -> Secret dockerconfigjson
+│   │   └── predict-build-cronjob.yaml # CronJob suspendu : modèle MLflow -> image GHCR (code : branche bento)
 │   └── mlflow/
 │       ├── postgres-credentials.yaml  # ExternalSecret : accès à la base mlflow
 │       ├── nodeport.yaml              # Service NodePort 30500
@@ -179,8 +204,10 @@ ArgoCD_Udemy/
 |---|---|---|---|
 | branche `bootstrap` | Scripts d'installation + point d'entrée | appliqué à la main, une fois | Ne contient que ce qui est nécessaire *avant* qu'ArgoCD tourne |
 | branche `pyeso` | Code Python exécuté par les CronJobs | cloné par le CronJob à chaque exécution | Branche orpheline : pas de code applicatif sur `infra` |
+| branche `bento` | Code de l'API predict | cloné par le job de build | Branche orpheline |
+| branche `helm` | Chart umbrella + Applications d'un projet applicatif | l'Application d'entrée du projet (`apps/products/`) | Branche orpheline ; les **droits** du projet restent sur `infra` |
 | `projects/` | Uniquement des `AppProject` | `root-projects` | Un fichier par projet |
-| `apps/` | Uniquement des `Application` ArgoCD | `root` (récursif) | Un dossier par composant, un fichier `application.yaml`. **Aucun autre YAML** (sinon `root` essaie de l'appliquer) |
+| `apps/` | Uniquement des `Application` ArgoCD | `root` (récursif) | Un dossier par composant (`platform/`) ou par projet applicatif (`products/`), un fichier `application.yaml`. **Aucun autre YAML** (sinon `root` essaie de l'appliquer) |
 | `manifests/` | Fichiers de values Helm | lus via `$values` par une Application | Jamais synchronisé directement |
 | `workloads/` | Manifests Kubernetes classiques | une Application de `apps/` qui pointe dessus | Jamais synchronisé directement par une app racine. **Un fichier par rôle fonctionnel** (plusieurs ressources possibles) |
 
@@ -459,6 +486,38 @@ Volontairement **non annotés** :
 kubectl -n reloader logs deploy/reloader-reloader | grep -i reload
 ```
 
+### Projet `predict` (API de prédiction BentoML)
+
+Premier **projet applicatif** du lab : une API qui estime le prix des logements californiens, déployée en **dev** et en **recette** à partir d'un chart umbrella. Le code est sur la branche `bento`, le chart et les Applications sur la branche `helm` (voir leurs README). Ici, sur `infra`, ne vit que ce que la plateforme contrôle :
+
+| Fichier | Rôle |
+|---|---|
+| `projects/predict-project.yaml` | AppProject **`predict`** : ce repo, namespaces `dev` et `recette`, kind `Namespace` seulement côté cluster |
+| `apps/products/predict/application.yaml` | Application **`predict`** (projet `infra`, wave `4`) : synchronise `helm:argocd/`, qui crée les Applications `dev` et `recette` |
+| `workloads/postgres/databases/predict-{dev,recette}/` | Bases et rôles `predict_dev` / `predict_recette` (Application `postgres`) |
+| `apps/platform/bento-build/` + `workloads/bento-build/` | Job de build des images (voir ci-dessous) |
+
+**Pourquoi les droits restent sur `infra`** : l'AppProject définit ce que les Applications du projet ont le droit de faire. S'il vivait sur `helm`, quiconque peut pousser sur `helm` pourrait s'accorder de nouveaux namespaces ou des ressources cluster. Ajouter un environnement (ex. `preprod`) demande donc deux changements : la destination dans l'AppProject et la base ici, puis l'Application et le fichier de values sur `helm`.
+
+**`Namespace` dans `clusterResourceWhitelist`** : les Applications `dev` et `recette` utilisent `CreateNamespace=true`, et ArgoCD soumet ce Namespace créé automatiquement au même contrôle de permissions que les ressources du chart (gitops-engine : `autoCreateNamespace` ajoute la tâche avant `permissionValidator`). Sans ce kind autorisé, le sync échoue.
+
+### `apps/platform/bento-build/application.yaml`
+
+Application **`bento-build`** (sync-wave `3`) — déploie `workloads/bento-build/` dans `bento-build`.
+
+- **`ghcr-credentials.yaml`** — `ExternalSecret` : `username` / `token` lus dans OpenBao `secret/ghcr`, mis en forme en Secret `kubernetes.io/dockerconfigjson` pour GHCR.
+- **`predict-build-cronjob.yaml`** — `CronJob` **suspendu** `predict-build`, qui ne sert que de modèle de Job, lancé à la main après un entraînement :
+  1. *init* `clone` : branche `bento` + commit courant ;
+  2. *init* `context` (image uv, Python 3.12) : `build_context.py` importe `models:/california-housing@dev` depuis MLflow (artefacts servis en proxy, aucun identifiant S3), construit le Bento et écrit le contexte de build Docker + le tag `v<version MLflow>-<commit>` ;
+  3. `buildkit` : **BuildKit rootless** construit le contexte et pousse `ghcr.io/jeanbaptiste-billaud/predict:<tag>`.
+
+```bash
+kubectl -n bento-build create job --from=cronjob/predict-build predict-build-$(date +%s)
+kubectl -n bento-build logs -f job/<nom> --all-containers   # dernière ligne : image poussée
+```
+
+BuildKit rootless n'a besoin d'aucun privilège, mais crée ses propres user namespaces : son conteneur tourne avec seccomp et AppArmor **`Unconfined`**. C'est la configuration officielle de BuildKit pour Kubernetes (`--oci-worker-no-process-sandbox`). `bentoml containerize` n'est pas utilisable dans un pod (il lui faut un démon Docker), d'où la séparation contexte / build.
+
 ### `apps/platform/prometheus/application.yaml`
 
 Application **`prometheus`** — chart OCI `kube-prometheus-stack` **92.3.1**, release `prometheus`, dans `monitoring`.
@@ -609,6 +668,27 @@ kubectl -n openbao exec openbao-0 -- sh -c 'export BAO_TOKEN=<root-token>
 
 Les données sont persistées sur le PVC : elles survivent aux redémarrages (il suffit de refaire l'unseal).
 
+### 8. Projet `predict` : bases, registre d'images
+
+**Static roles des bases `predict_dev` / `predict_recette`**, après le premier sync de `postgres` (les Jobs `db-predict-*` créent les rôles et les délèguent au rôle `openbao`) :
+
+```bash
+kubectl -n openbao exec openbao-0 -- sh -c 'export BAO_TOKEN=<root-token>
+  bao write database/static-roles/predict-dev-role \
+    db_name=my-postgresql-database username=predict_dev rotation_period=24h
+  bao write database/static-roles/predict-recette-role \
+    db_name=my-postgresql-database username=predict_recette rotation_period=24h'
+```
+
+**Identifiants GHCR du job de build** : un PAT GitHub *classic* avec le scope `write:packages` (Settings → Developer settings → Personal access tokens) :
+
+```bash
+kubectl -n openbao exec openbao-0 -- sh -c \
+  'BAO_TOKEN=<root-token> bao kv put secret/ghcr username=jeanbaptiste-billaud token=<PAT>'
+```
+
+**Après le premier push**, rendre le package public (GitHub → Packages → `predict` → Package settings → Change visibility → Public) : les pods `dev` / `recette` tirent l'image sans `imagePullSecrets`.
+
 Vérification :
 
 ```bash
@@ -636,6 +716,8 @@ kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP
 | OpenBao | `http://<IP>:30200` | root token obtenu au `bao operator init` |
 | SeaweedFS S3 | `http://<IP>:30333` | identité `admin` : `secret/seaweedfs/admin` ; identité `mlflow` : `secret/seaweedfs/s3` |
 | MLflow | `http://<IP>:30500` | — (pas d'authentification) |
+| API predict — dev | `http://<IP>:30801` (Swagger UI) | — |
+| API predict — recette | `http://<IP>:30802` (Swagger UI) | — |
 | Prometheus | `http://<IP>:30060` | — (si déployé) |
 | Grafana | `http://<IP>:30070` | `admin` / `admin` (si déployé) |
 
@@ -659,6 +741,8 @@ L'annotation `argocd.argoproj.io/sync-wave` ordonne la création des objets **au
 | `1` | `eso-config` | `root` | A besoin des CRDs installées par l'opérateur ESO |
 | `2` | `seaweedfs`, `postgres` | `root` | Ont besoin du `ClusterSecretStore` créé par `eso-config` |
 | `3` | `mlflow` | `root` | A besoin de PostgreSQL et de SeaweedFS (bucket `mlflow`) |
+| `3` | `bento-build` | `root` | A besoin du `ClusterSecretStore` ; le build lit MLflow |
+| `4` | `predict` | `root` | Les bases `predict_*` (Application `postgres`) doivent exister |
 
 ---
 
@@ -820,6 +904,9 @@ Ce repo est un **lab local**. Plusieurs choix sont inacceptables en production :
 | MLflow sans authentification, `serverAllowedHosts: *` | `manifests/mlflow/values.yaml` | `auth`/OIDC activé, liste d'hôtes explicite, Ingress TLS |
 | PostgreSQL mono-instance sans sauvegarde | `workloads/postgres/` | Opérateur (CloudNativePG) avec réplication et sauvegardes |
 | `clusterResourceWhitelist: */*` | `projects/infra-project.yaml` | Liste restreinte des kinds nécessaires |
+| Une Application peut déclarer n'importe quel `project` : quiconque pousse sur `helm:argocd/` pourrait y écrire `project: infra` | `apps/products/predict/application.yaml` | *Apps in any namespace* (Applications du projet dans leur propre namespace, `sourceNamespaces` de l'AppProject) ou ApplicationSet défini sur `infra` |
+| Le `ClusterSecretStore` `openbao-database` est utilisable depuis tous les namespaces (dev pourrait lire les identifiants de MLflow) | `workloads/eso-config/` | Un `SecretStore` par namespace avec une policy OpenBao limitée à ses static roles |
+| BuildKit avec seccomp / AppArmor `Unconfined` | `workloads/bento-build/predict-build-cronjob.yaml` | Nœuds de build dédiés, ou build en CI externe |
 
 ---
 

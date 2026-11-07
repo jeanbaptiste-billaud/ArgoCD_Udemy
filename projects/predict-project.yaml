@@ -1,0 +1,25 @@
+# AppProject "predict" : droits des Applications dev et recette (branche helm, argocd/).
+# Defini ici, sur infra, et non sur helm : qui peut pousser sur helm ne doit pas pouvoir
+# elargir ses propres droits (nouveaux namespaces, ressources cluster).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: predict
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-options: Delete=false   # ne jamais supprimer le projet en cascade
+spec:
+  description: API de prediction predict (BentoML) - environnements dev et recette
+  sourceRepos:
+    - https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git   # toutes branches (dont helm)
+  # Un namespace par environnement, du nom de son Application
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: dev
+    - server: https://kubernetes.default.svc
+      namespace: recette
+  # Ressources cluster : uniquement le Namespace, que CreateNamespace=true cree
+  # (ArgoCD le soumet aux memes controles que les ressources du chart)
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace

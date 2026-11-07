@@ -1,0 +1,33 @@
+# Build des images BentoML du projet predict : CronJob suspendu (lance a la main) +
+# identifiants GHCR (ExternalSecret). Code : branche orpheline "bento".
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: bento-build
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"   # apres eso-config (ClusterSecretStore) ; MLflow sert au build
+spec:
+  project: infra
+  source:
+    repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
+    targetRevision: infra
+    path: workloads/bento-build
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: bento-build
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 10
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m

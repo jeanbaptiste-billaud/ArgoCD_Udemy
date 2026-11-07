@@ -1,0 +1,26 @@
+# Point d'entree du projet predict : synchronise helm:argocd/, qui contient les
+# Applications "dev" et "recette" (projet "predict", defini dans projects/).
+# Le chart umbrella et ses values par environnement vivent aussi sur la branche helm :
+# l'equipe du projet deploie sans toucher a infra.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: predict
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"   # apres postgres (bases predict_*) et bento-build
+spec:
+  project: infra                      # cree des Applications dans argocd : droit de la plateforme
+  source:
+    repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
+    targetRevision: helm
+    path: argocd
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

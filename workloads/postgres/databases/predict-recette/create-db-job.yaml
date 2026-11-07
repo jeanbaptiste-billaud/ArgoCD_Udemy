@@ -1,0 +1,57 @@
+# Cree le role et la base s'ils n'existent pas. Ne touche PAS au mot de passe :
+# il appartient au static role "predict-recette-role" du moteur database d'OpenBao.
+# Hook PostSync : rejoue a chaque sync de l'Application postgres (idempotent).
+# Base de l'environnement recette de l'API predict (Application "recette", branche helm).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-predict-recette
+  namespace: postgres
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-db
+          image: postgres:17
+          env:
+            - name: DB_NAME
+              value: predict_recette
+            - name: DB_USER
+              value: predict_recette
+            # Role PostgreSQL d'OpenBao : doit pouvoir changer le mot de passe de DB_USER
+            - name: BAO_USER
+              value: openbao
+            # Connexion en superutilisateur (variables libpq)
+            - name: PGHOST
+              value: postgres.postgres.svc
+            - name: PGDATABASE
+              value: postgres
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-admin
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-admin
+                  key: password
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready; do echo "attente de postgres..."; sleep 2; done
+              psql -v ON_ERROR_STOP=1 -v db="$DB_NAME" -v user="$DB_USER" -v bao="$BAO_USER" <<'SQL'
+              SELECT format('CREATE ROLE %I LOGIN', :'user')
+                WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'user') \gexec
+              SELECT format('GRANT %I TO %I WITH ADMIN OPTION', :'user', :'bao')
+                WHERE EXISTS (SELECT FROM pg_roles WHERE rolname = :'bao') \gexec
+              SELECT format('CREATE DATABASE %I OWNER %I', :'db', :'user')
+                WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = :'db') \gexec
+              SELECT format('ALTER DATABASE %I OWNER TO %I', :'db', :'user') \gexec
+              SQL

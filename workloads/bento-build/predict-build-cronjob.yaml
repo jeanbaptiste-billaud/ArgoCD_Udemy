@@ -1,0 +1,162 @@
+# Build de l'image de l'API predict : modele MLflow @dev -> Bento -> image GHCR.
+# CronJob SUSPENDU : uniquement un modele de Job, lance a la main apres un entrainement :
+#   kubectl -n bento-build create job --from=cronjob/predict-build predict-build-$(date +%s)
+# Etapes (le code vit sur la branche orpheline "bento") :
+#   1. clone de la branche bento + commit courant (suffixe du tag)
+#   2. build_context.py : models:/california-housing@dev -> store BentoML -> Bento ->
+#      contexte de build Docker complet + IMAGE_TAG (v<version MLflow>-<commit>)
+#   3. BuildKit rootless construit le contexte et pousse ghcr.io/.../predict:<tag>
+# Le tag pousse est affiche a la fin des logs : le reporter dans values-dev.yaml (branche helm).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: predict-build
+  namespace: bento-build
+spec:
+  schedule: "0 0 1 1 *"              # sans effet : suspendu
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: clone
+              image: alpine/git:2.54.0
+              command:
+                - sh
+                - -c
+                - |
+                  git clone --depth=1 --single-branch --branch=bento \
+                    https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git /src
+                  git -C /src rev-parse --short=7 HEAD > /tmp/commit
+              env:
+                - name: HOME
+                  value: /tmp
+              securityContext: &restricted
+                runAsUser: 65534
+                runAsGroup: 65534
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: src
+                  mountPath: /src
+                - name: tmp
+                  mountPath: /tmp
+            - name: context
+              image: ghcr.io/astral-sh/uv:0.13.5-python3.12-trixie-slim
+              workingDir: /src
+              command:
+                - sh
+                - -c
+                - |
+                  uv sync --frozen --quiet
+                  exec /tmp/venv/bin/python build_context.py \
+                    --alias "$MODEL_ALIAS" --out /ctx --code-version "$(cat /tmp/commit)"
+              env:
+                - name: MODEL_ALIAS               # version du registre MLflow a packager
+                  value: dev
+                - name: MLFLOW_TRACKING_URI       # artefacts servis en proxy par MLflow
+                  value: http://mlflow.mlflow.svc:80
+                - name: BENTOML_HOME              # store BentoML ephemere
+                  value: /tmp/bentoml
+                - name: BENTOML_DO_NOT_TRACK
+                  value: "true"
+                - name: UV_PROJECT_ENVIRONMENT    # venv et cache hors du rootfs en lecture seule
+                  value: /tmp/venv
+                - name: UV_CACHE_DIR
+                  value: /tmp/uv-cache
+                - name: UV_PYTHON_DOWNLOADS
+                  value: never
+                - name: HOME
+                  value: /tmp
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+              securityContext: *restricted
+              volumeMounts:
+                - name: src
+                  mountPath: /src
+                - name: tmp
+                  mountPath: /tmp
+                - name: ctx
+                  mountPath: /ctx
+              resources:
+                requests:
+                  cpu: 200m
+                  memory: 512Mi
+                limits:
+                  memory: 1Gi
+          containers:
+            # BuildKit rootless, sans demon permanent ni privilege : buildctl-daemonless.sh
+            # lance buildkitd le temps du build. Il cree ses propres user namespaces, d'ou
+            # seccomp et AppArmor "Unconfined" (configuration officielle de BuildKit pour Kubernetes).
+            - name: buildkit
+              image: moby/buildkit:v0.34.2-rootless
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  TAG="$(cat /ctx/IMAGE_TAG)"
+                  buildctl-daemonless.sh build \
+                    --frontend dockerfile.v0 \
+                    --local context=/ctx \
+                    --local dockerfile=/ctx/env/docker \
+                    --opt label:org.opencontainers.image.source=https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy \
+                    --output "type=image,name=$IMAGE:$TAG,push=true"
+                  echo "image poussee : $IMAGE:$TAG"
+              env:
+                - name: IMAGE
+                  value: ghcr.io/jeanbaptiste-billaud/predict
+                - name: BUILDKITD_FLAGS
+                  value: --oci-worker-no-process-sandbox
+                - name: DOCKER_CONFIG             # config.json = Secret ghcr-credentials
+                  value: /docker
+              securityContext:
+                runAsUser: 1000                   # utilisateur "user" de l'image rootless
+                runAsGroup: 1000
+                seccompProfile:
+                  type: Unconfined
+                appArmorProfile:
+                  type: Unconfined
+              volumeMounts:
+                - name: ctx
+                  mountPath: /ctx
+                  readOnly: true
+                - name: buildkitd
+                  mountPath: /home/user/.local/share/buildkit
+                - name: docker-config
+                  mountPath: /docker
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 500m
+                  memory: 1Gi
+                limits:
+                  memory: 3Gi
+          volumes:
+            - name: src
+              emptyDir: {}
+            - name: tmp
+              emptyDir: {}
+            - name: ctx
+              emptyDir: {}
+            - name: buildkitd
+              emptyDir: {}
+            - name: docker-config
+              secret:
+                secretName: ghcr-credentials
+                items:
+                  - key: .dockerconfigjson
+                    path: config.json

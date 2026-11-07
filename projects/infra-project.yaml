@@ -33,6 +33,8 @@ spec:
     - server: https://kubernetes.default.svc
       namespace: reloader          # Reloader (redemarrage sur changement de Secret)
     - server: https://kubernetes.default.svc
+      namespace: bento-build       # build des images BentoML (projet predict)
+    - server: https://kubernetes.default.svc
       namespace: monitoring        # kube-prometheus-stack
     - server: https://kubernetes.default.svc
       namespace: kube-system       # composants systeme deployes par certains charts
