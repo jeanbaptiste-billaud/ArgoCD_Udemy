@@ -1,10 +1,10 @@
 # ArgoCD_Udemy — branche `pyeso`
 
-Outils Python de gestion des secrets du cluster. Branche **orpheline** : elle ne partage aucun historique avec `main` (manifests GitOps) ni `bootstrap` (installation).
+Outils Python de gestion des secrets du cluster. Branche **orpheline** : elle ne partage aucun historique avec `infra` (manifests GitOps) ni `bootstrap` (installation).
 
 | Branche | Contenu | Qui la lit |
 |---|---|---|
-| `main` | Manifests GitOps | ArgoCD |
+| `infra` | Manifests GitOps | ArgoCD |
 | `bootstrap` | Scripts d'installation + `root-app.yaml` | Appliquée une fois à la main |
 | **`pyeso`** | Package `pyESO` + scripts de rotation | **Clonée par les CronJobs** au démarrage |
 
@@ -27,7 +27,7 @@ uv.lock           # versions figées des dépendances
 
 ## Exécution dans le cluster
 
-Le CronJob `mlflow-s3-rotation` (`main:workloads/mlflow/s3/s3-rotation-cronjob.yaml`) :
+Le CronJob `mlflow-s3-rotation` (`infra:workloads/mlflow/s3/s3-rotation-cronjob.yaml`) :
 
 1. un init container clone **cette branche** (`git clone --depth 1 --branch pyeso`) dans un `emptyDir` ;
 2. le conteneur principal (image `ghcr.io/astral-sh/uv`) installe les dépendances de `uv.lock`, sans construire le projet (`pyESO` est importé via `PYTHONPATH=/src`), et lance le script :
