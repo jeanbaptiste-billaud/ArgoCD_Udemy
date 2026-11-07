@@ -1,0 +1,16 @@
+# Bento "predict" : service.py + modele california-housing (importe par build_context.py)
+service: "service:Predict"
+include:
+  - service.py
+python:
+  # Memes versions que pyproject.toml / uv.lock (le modele serialise en depend)
+  packages:
+    - mlflow-skinny==3.16.0
+    - scikit-learn==1.9.1
+    - pandas==3.1.1
+    - numpy==2.5.4
+    - scipy==1.18.1
+    - skops==0.16.0             # format de serialisation sklearn par defaut de MLflow 3
+    - psycopg[binary]==3.3.8
+docker:
+  python_version: "3.12"
