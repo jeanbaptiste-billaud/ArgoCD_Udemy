@@ -22,7 +22,7 @@ spec:
         valueFiles:
           - $values/manifests/argocd/values.yaml
     - repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
-      targetRevision: main
+      targetRevision: infra
       ref: values
   destination:
     server: https://kubernetes.default.svc

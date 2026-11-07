@@ -18,10 +18,10 @@ spec:
         valueFiles:
           - $values/manifests/seaweedfs/values.yaml
     - repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
-      targetRevision: main
+      targetRevision: infra
       ref: values                     # lecture de manifests/seaweedfs/values.yaml
     - repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
-      targetRevision: main
+      targetRevision: infra
       path: workloads/seaweedfs       # ExternalSecret S3 + Service NodePort S3
   destination:
     server: https://kubernetes.default.svc

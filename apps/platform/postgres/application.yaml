@@ -12,7 +12,7 @@ spec:
   project: infra
   source:
     repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
-    targetRevision: main
+    targetRevision: infra
     path: workloads/postgres
     directory:
       recurse: true                   # inclut databases/

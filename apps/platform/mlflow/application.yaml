@@ -18,10 +18,10 @@ spec:
         valueFiles:
           - $values/manifests/mlflow/values.yaml
     - repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
-      targetRevision: main
+      targetRevision: infra
       ref: values                     # lecture de manifests/mlflow/values.yaml
     - repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
-      targetRevision: main
+      targetRevision: infra
       path: workloads/mlflow          # ExternalSecrets, PushSecret, Service NodePort
       directory:
         recurse: true

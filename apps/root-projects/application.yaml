@@ -16,7 +16,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git
-    targetRevision: main
+    targetRevision: infra
     path: projects
     directory:
       recurse: true

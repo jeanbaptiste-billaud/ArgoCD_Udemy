@@ -17,7 +17,7 @@ spec:
         valueFiles:
           - $values/manifests/openbao/values.yaml
     - repoURL: https://github.com/jeanbaptiste-billaud/ArgoCD_Udemy.git   # le repo qui contient manifests/openbao/values.yaml
-      targetRevision: main
+      targetRevision: infra
       ref: values
   destination:
     server: https://kubernetes.default.svc

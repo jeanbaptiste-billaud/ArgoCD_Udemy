@@ -2,15 +2,15 @@
 
 Lab GitOps d'un cluster Kubernetes local (MicroK8s sous WSL2), entièrement piloté par **ArgoCD** selon le pattern **app-of-apps**.
 
-Le repo a **trois branches** :
+Ce README décrit la branche **`infra`** (la plateforme). Les branches du repo sont présentées dans le README de `main` ; celles dont dépend la plateforme :
 
 | Branche | Contenu | Usage |
 |---|---|---|
 | **`bootstrap`** | Scripts d'installation (MicroK8s, ArgoCD) + `root-app.yaml` | Téléchargée une seule fois pour installer le cluster |
-| **`main`** | Toutes les Applications et leur configuration | Seule source de vérité ensuite |
+| **`infra`** | Toutes les Applications plateforme et leur configuration | Seule source de vérité ensuite |
 | **`pyeso`** | Outils Python : package `pyESO` + scripts de rotation (`s3_rotation/`), projet uv | Clonée au démarrage par les CronJobs (voir son README) |
 
-Une fois le bootstrap effectué, **Git est la seule source de vérité** : toute modification du cluster passe par un commit sur `main`, qu'ArgoCD applique automatiquement. `main` ne dépend jamais de la branche `bootstrap`.
+Une fois le bootstrap effectué, **Git est la seule source de vérité** : toute modification du cluster passe par un commit sur `infra`, qu'ArgoCD applique automatiquement. `infra` ne dépend jamais de la branche `bootstrap`.
 
 Composants déployés :
 
@@ -52,7 +52,7 @@ flowchart TD
 
     RA --> ROOT[Application<br/>root]
 
-    ROOT -->|synchronise main:apps/ récursivement| RP[Application<br/>root-projects]
+    ROOT -->|synchronise infra:apps/ récursivement| RP[Application<br/>root-projects]
     RP -->|synchronise projects/| PRJ[AppProject<br/>infra]
 
     ROOT --> ARGO[Application<br/>argocd]
@@ -84,7 +84,7 @@ flowchart TD
 
 Points clés :
 
-- **`root-app.yaml` (branche `bootstrap`) est le seul fichier appliqué à la main.** Il crée l'Application racine **`root`**, qui synchronise `main:apps/`. Tout le reste en découle :
+- **`root-app.yaml` (branche `bootstrap`) est le seul fichier appliqué à la main.** Il crée l'Application racine **`root`**, qui synchronise `infra:apps/`. Tout le reste en découle :
   - `root-projects` (définie dans `apps/root-projects/`) → synchronise `projects/` (les **AppProjects**) ;
   - les autres fichiers de `apps/` → toutes les **Applications** plateforme.
 - **`root` n'est pas surveillée par ArgoCD** : ajouter une app ne demande aucune action sur la branche `bootstrap`. On ne réapplique `root-app.yaml` que pour modifier `root` elle-même.
@@ -102,10 +102,10 @@ Branche **`bootstrap`** (voir son propre README) :
 ├── install_kub_microk8s.sh            # 1. installe MicroK8s sous WSL2
 ├── install_ArgoCD.sh                  # 2. installe ArgoCD (Helm) + CLI + applique root-app.yaml
 ├── argocd-values.yaml                 # values Helm MINIMALES du premier install
-└── root-app.yaml                      # 3. point d'entrée GitOps : Application "root" -> main:apps/
+└── root-app.yaml                      # 3. point d'entrée GitOps : Application "root" -> infra:apps/
 ```
 
-Branche **`main`** :
+Branche **`infra`** :
 
 ```
 ArgoCD_Udemy/
@@ -178,7 +178,7 @@ ArgoCD_Udemy/
 | Dossier | Contient | Synchronisé par | Règle |
 |---|---|---|---|
 | branche `bootstrap` | Scripts d'installation + point d'entrée | appliqué à la main, une fois | Ne contient que ce qui est nécessaire *avant* qu'ArgoCD tourne |
-| branche `pyeso` | Code Python exécuté par les CronJobs | cloné par le CronJob à chaque exécution | Branche orpheline : pas de code applicatif sur `main` |
+| branche `pyeso` | Code Python exécuté par les CronJobs | cloné par le CronJob à chaque exécution | Branche orpheline : pas de code applicatif sur `infra` |
 | `projects/` | Uniquement des `AppProject` | `root-projects` | Un fichier par projet |
 | `apps/` | Uniquement des `Application` ArgoCD | `root` (récursif) | Un dossier par composant, un fichier `application.yaml`. **Aucun autre YAML** (sinon `root` essaie de l'appliquer) |
 | `manifests/` | Fichiers de values Helm | lus via `$values` par une Application | Jamais synchronisé directement |
@@ -197,7 +197,7 @@ Décrite en détail dans le README de la branche. En résumé :
 - **`install_kub_microk8s.sh`** — installe MicroK8s sous WSL2 (⚠️ désactiver d'abord l'intégration Docker Desktop), addons `dns`, `storage`, `dashboard`, alias `kubectl`/`helm`.
 - **`install_ArgoCD.sh`** — `helm install` du chart `argo-cd` **10.1.3** (release `argocd`) avec des values **minimales**, installe la CLI `argocd` **v3.4.5**, se connecte, puis applique `root-app.yaml`.
 - **`argocd-values.yaml`** — values minimales du premier install (NodePort `30080`, HTTP). Pas de `ServiceMonitor` : leur CRD n'existe pas encore.
-- **`root-app.yaml`** — Application racine **`root`** (projet `default`) : synchronise `main:apps/` récursivement, exclut `platform/prometheus/*`, `prune` + `selfHeal`, finalizer.
+- **`root-app.yaml`** — Application racine **`root`** (projet `default`) : synchronise `infra:apps/` récursivement, exclut `platform/prometheus/*`, `prune` + `selfHeal`, finalizer.
 
 > ⚠️ `root` a `prune: true` et un finalizer : **supprimer ou exclure un fichier de `apps/` supprime l'Application correspondante et toutes les ressources qu'elle a déployées**. Supprimer `root` elle-même supprimerait tout le cluster applicatif.
 
@@ -247,7 +247,7 @@ AppProject **`infra`**, utilisé par toutes les Applications plateforme. Il déf
 Application **`argocd`** — ArgoCD qui se gère lui-même (sync-wave `-1`). Utilise **deux sources** :
 
 1. le chart Helm `argo-cd` 10.1.3, release `argocd`, avec `$values/manifests/argocd/values.yaml` ;
-2. ce repo Git (branche `main`), référencé sous le nom `values` (sert uniquement à lire le fichier de values ci-dessus).
+2. ce repo Git (branche `infra`), référencé sous le nom `values` (sert uniquement à lire le fichier de values ci-dessus).
 
 Choix de prudence :
 - **Pas de finalizer** : supprimer cette Application ne désinstalle ni ArgoCD ni le reste du cluster.
@@ -516,7 +516,7 @@ kubectl -n argocd get applications
 
 Déroulé côté ArgoCD après le `kubectl apply -f root-app.yaml` :
 
-1. `root` (projet `default`) synchronise `main:apps/`.
+1. `root` (projet `default`) synchronise `infra:apps/`.
 2. `root-projects` (wave `-1`) crée l'AppProject `infra`. Les autres Applications (projet `infra`) réessaient jusqu'à ce qu'il existe.
 3. `argocd` reprend la release Helm installée par le script, avec les values complètes de `manifests/argocd/values.yaml`.
 4. `external-secrets-operator` et `openbao` s'installent.
@@ -668,7 +668,7 @@ L'annotation `argocd.argoproj.io/sync-wave` ordonne la création des objets **au
 
 1. Créer `apps/platform/<composant>/application.yaml` (s'inspirer d'`openbao`) avec `project: infra`.
 2. Si le chart vient d'un **nouveau repo** ou cible un **nouveau namespace**, l'ajouter dans `projects/infra-project.yaml` (`sourceRepos` / `destinations`).
-3. Commit + push sur `main`. `root` crée l'Application automatiquement — **aucune action sur la branche `bootstrap`**.
+3. Commit + push sur `infra`. `root` crée l'Application automatiquement — **aucune action sur la branche `bootstrap`**.
 
 ### Ajouter un nouvel AppProject
 
@@ -698,7 +698,7 @@ Pour le refaire gérer automatiquement par ArgoCD, retirer la ligne `exclude` de
 
 ### Mettre à jour ArgoCD
 
-Changer `targetRevision` (chart) dans `apps/platform/argocd/application.yaml` sur `main`. Commit + push. Pour que les futures installations partent de la même version, mettre aussi à jour `--version` dans `install_ArgoCD.sh` sur la branche `bootstrap`.
+Changer `targetRevision` (chart) dans `apps/platform/argocd/application.yaml` sur `infra`. Commit + push. Pour que les futures installations partent de la même version, mettre aussi à jour `--version` dans `install_ArgoCD.sh` sur la branche `bootstrap`.
 
 ### Ajouter une base PostgreSQL
 
